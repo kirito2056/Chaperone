@@ -1,11 +1,23 @@
-use chaperone_sim::analysis::{EnergyMonitor, EnergySummary, PeriodTracker};
+use chaperone_sim::analysis::{
+    fraction_of_native_contacts, EnergyMonitor, EnergySummary, PeriodTracker, CONTACT_TOLERANCE,
+};
 use chaperone_sim::integrator;
 use chaperone_sim::scenario::{self, BOND_K, R0, SIGMA};
 use chaperone_sim::system::{Real, PI};
 
 const DT: Real = 1e-3;
-const STEPS: usize = 1_000_000;
+const DEFAULT_STEPS: usize = 1_000_000;
 const SAMPLE_EVERY: usize = 1000;
+
+fn steps() -> usize {
+    std::env::args()
+        .nth(2)
+        .map(|s| {
+            s.parse()
+                .unwrap_or_else(|_| panic!("steps must be an integer, got {s:?}"))
+        })
+        .unwrap_or(DEFAULT_STEPS)
+}
 
 fn report(summary: &EnergySummary, steps: usize, elapsed: std::time::Duration) {
     eprintln!("steps                {steps}");
@@ -38,12 +50,13 @@ fn report(summary: &EnergySummary, steps: usize, elapsed: std::time::Duration) {
 }
 
 fn run_spring() {
+    let steps = steps();
     let initial_separation = 5.0;
     let (mut sys, ff) = scenario::spring(initial_separation);
     let energies = integrator::initialize(&mut sys, &ff);
     let e_initial = energies.total();
 
-    let mut monitor = EnergyMonitor::new(e_initial, STEPS);
+    let mut monitor = EnergyMonitor::new(e_initial, steps);
     let mut tracker = PeriodTracker::new(sys.distance(0, 1) - R0, 0.0);
     let mut r_min = initial_separation;
     let mut r_max = initial_separation;
@@ -59,7 +72,7 @@ fn run_spring() {
 
     let start = std::time::Instant::now();
 
-    for step in 0..STEPS {
+    for step in 0..steps {
         let energies = integrator::step(&mut sys, &ff, DT);
         let e_total = energies.total();
         let drift = monitor.update(step, &sys, e_total);
@@ -81,7 +94,7 @@ fn run_spring() {
     }
 
     let elapsed = start.elapsed();
-    report(&monitor.summary(), STEPS, elapsed);
+    report(&monitor.summary(), steps, elapsed);
 
     let reduced_mass = 0.5;
     let omega = (2.0 * BOND_K / reduced_mass).sqrt();
@@ -104,11 +117,12 @@ fn run_spring() {
 }
 
 fn run_chain4() {
+    let steps = steps();
     let (mut sys, ff) = scenario::chain4();
     let energies = integrator::initialize(&mut sys, &ff);
     let e_initial = energies.total();
 
-    let mut monitor = EnergyMonitor::new(e_initial, STEPS);
+    let mut monitor = EnergyMonitor::new(e_initial, steps);
     let mut gap_min = sys.distance(0, 3);
     let mut gap_max = gap_min;
 
@@ -124,7 +138,7 @@ fn run_chain4() {
 
     let start = std::time::Instant::now();
 
-    for step in 0..STEPS {
+    for step in 0..steps {
         let energies = integrator::step(&mut sys, &ff, DT);
         let e_total = energies.total();
         let drift = monitor.update(step, &sys, e_total);
@@ -146,7 +160,7 @@ fn run_chain4() {
     }
 
     let elapsed = start.elapsed();
-    report(&monitor.summary(), STEPS, elapsed);
+    report(&monitor.summary(), steps, elapsed);
 
     eprintln!();
     eprintln!("pairs                {}", ff.repulsion_pairs.len());
@@ -154,13 +168,67 @@ fn run_chain4() {
     eprintln!("closest approach     {:.3} sigma", gap_min / SIGMA);
 }
 
+fn run_chain5() {
+    let steps = steps();
+    let (mut sys, ff) = scenario::chain5();
+    let initial = integrator::initialize(&mut sys, &ff);
+    let e_initial = initial.total();
+
+    let mut monitor = EnergyMonitor::new(e_initial, steps);
+    let mut max_bond = initial.bond;
+    let mut max_native_abs = initial.native.abs();
+    let mut max_repulsion = initial.repulsion;
+    let mut q_min = 1.0;
+
+    println!("step,time,q,e_bond,e_native,e_rep,e_kin,e_total,drift");
+
+    let start = std::time::Instant::now();
+
+    for step in 0..steps {
+        let energies = integrator::step(&mut sys, &ff, DT);
+        let e_total = energies.total();
+        let drift = monitor.update(step, &sys, e_total);
+
+        max_bond = max_bond.max(energies.bond);
+        max_native_abs = max_native_abs.max(energies.native.abs());
+        max_repulsion = max_repulsion.max(energies.repulsion);
+
+        let q = fraction_of_native_contacts(&sys, &ff.native, CONTACT_TOLERANCE).unwrap_or(0.0);
+        q_min = q.min(q_min);
+
+        if (step + 1) % SAMPLE_EVERY == 0 {
+            println!(
+                "{},{:.6},{q:.4},{:.9},{:.9},{:.9},{:.9},{e_total:.9},{drift:.3e}",
+                step + 1,
+                (step + 1) as Real * DT,
+                energies.bond,
+                energies.native,
+                energies.repulsion,
+                energies.kinetic
+            );
+        }
+    }
+
+    let elapsed = start.elapsed();
+    report(&monitor.summary(), steps, elapsed);
+
+    eprintln!();
+    eprintln!("native contacts      {}", ff.native.len());
+    eprintln!("non-native pairs     {}", ff.repulsion_pairs.len());
+    eprintln!("peak |E_bond|        {max_bond:.6}");
+    eprintln!("peak |E_native|      {max_native_abs:.6}");
+    eprintln!("peak |E_rep|         {max_repulsion:.6}");
+    eprintln!("Q min                {q_min:.4}");
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         None | Some("spring") => run_spring(),
         Some("chain4") => run_chain4(),
+        Some("chain5") => run_chain5(),
         Some(other) => {
             eprintln!("unknown scenario: {other}");
-            eprintln!("usage: chaperone [spring|chain4]");
+            eprintln!("usage: chaperone [spring|chain4|chain5]");
             std::process::exit(1);
         }
     }

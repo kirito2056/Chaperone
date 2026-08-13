@@ -1,4 +1,35 @@
+use crate::forcefield::native::NativeContacts;
 use crate::system::{Real, System};
+
+pub const CONTACT_TOLERANCE: Real = 1.2;
+
+pub fn fraction_of_native_contacts(
+    sys: &System,
+    contacts: &NativeContacts,
+    tol: Real,
+) -> Option<Real> {
+    if contacts.is_empty() {
+        return None;
+    }
+
+    let mut formed = 0usize;
+    for c in 0..contacts.len() {
+        let i = contacts.i[c] as usize;
+        let j = contacts.j[c] as usize;
+
+        let dx = sys.pos_x[j] - sys.pos_x[i];
+        let dy = sys.pos_y[j] - sys.pos_y[i];
+        let dz = sys.pos_z[j] - sys.pos_z[i];
+        let r2 = dx * dx + dy * dy + dz * dz;
+
+        let threshold = tol * contacts.sigma[c];
+        if r2 < threshold * threshold {
+            formed += 1;
+        }
+    }
+
+    Some(formed as Real / contacts.len() as Real)
+}
 
 pub struct PeriodTracker {
     prev_offset: Real,
