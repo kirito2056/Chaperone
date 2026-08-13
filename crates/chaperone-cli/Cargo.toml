@@ -1,0 +1,11 @@
+[package]
+name = "chaperone-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "chaperone"
+path = "src/main.rs"
+
+[dependencies]
+chaperone-sim = { path = "../chaperone-sim" }
