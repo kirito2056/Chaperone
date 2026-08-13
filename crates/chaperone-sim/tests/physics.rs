@@ -1,9 +1,14 @@
-use chaperone_sim::analysis::PeriodTracker;
+use std::sync::OnceLock;
+
+use chaperone_sim::analysis::{EnergyMonitor, EnergySummary, PeriodTracker};
 use chaperone_sim::forcefield::bond::{self, Bonds};
 use chaperone_sim::forcefield::pairlist::PairList;
 use chaperone_sim::forcefield::repulsion;
 use chaperone_sim::integrator;
-use chaperone_sim::system::{Real, System};
+use chaperone_sim::scenario::{self, BOND_K, EPS, R0, SIGMA};
+use chaperone_sim::system::{Real, System, PI};
+
+const MIN_SEPARATION: Real = 0.8 * SIGMA;
 
 struct Lcg(u64);
 
@@ -20,12 +25,6 @@ impl Lcg {
         ((self.0 >> 11) as Real) / ((1u64 << 53) as Real)
     }
 }
-
-const K: Real = 100.0;
-const R0: Real = 3.8;
-const EPS: Real = 1.0;
-const SIGMA: Real = 4.0;
-const MIN_SEPARATION: Real = 0.8 * SIGMA;
 
 fn coord(sys: &mut System, i: usize, dim: usize) -> &mut Real {
     match dim {
@@ -70,8 +69,8 @@ fn random_chain(seed: u64, n: usize, box_size: Real, min_separation: Real) -> (S
     }
 
     let mut bonds = Bonds::new();
-    for i in 0..n - 1 {
-        bonds.push(i as u32, (i + 1) as u32, R0);
+    for i in 1..n {
+        bonds.push((i - 1) as u32, i as u32, R0);
     }
 
     (sys, bonds)
@@ -119,119 +118,57 @@ where
     }
 }
 
-fn two_bead_system(initial_separation: Real) -> (System, Bonds) {
-    let mut sys = System::new(2);
-    sys.pos_x[1] = initial_separation;
-
-    let mut bonds = Bonds::new();
-    bonds.push(0, 1, R0);
-
-    (sys, bonds)
-}
-
-fn chain4_system() -> (System, Bonds, PairList) {
-    let mut sys = System::new(4);
-    let corners = [(0.0, 0.0), (R0, 0.0), (R0, R0), (0.0, R0)];
-    for (i, (x, y)) in corners.iter().enumerate() {
-        sys.pos_x[i] = *x;
-        sys.pos_y[i] = *y;
-    }
-
-    let mut bonds = Bonds::new();
-    for i in 0..3 {
-        bonds.push(i as u32, (i + 1) as u32, R0);
-    }
-
-    (sys, bonds, PairList::all_pairs(4, 3))
-}
-
-struct EnergyStats {
-    max_abs_drift: Real,
-    head_mean: Real,
-    tail_mean: Real,
-}
-
-fn run_two_bead(dt: Real, steps: usize) -> EnergyStats {
-    let (mut sys, bonds) = two_bead_system(5.0);
-
-    sys.clear_forces();
-    let mut e_pot = bond::accumulate(&mut sys, &bonds, K);
-    let e_initial = e_pot + sys.kinetic_energy();
-
-    let window = steps / 10;
-    let mut head_sum = 0.0;
-    let mut tail_sum = 0.0;
-    let mut max_abs_drift: Real = 0.0;
+fn run_spring(dt: Real, steps: usize) -> EnergySummary {
+    let (mut sys, ff) = scenario::spring(5.0);
+    let energies = integrator::initialize(&mut sys, &ff);
+    let mut monitor = EnergyMonitor::new(energies.total(), steps);
 
     for step in 0..steps {
-        integrator::kick_drift(&mut sys, dt);
-        sys.clear_forces();
-        e_pot = bond::accumulate(&mut sys, &bonds, K);
-        integrator::kick(&mut sys, dt);
-
-        let e_total = e_pot + sys.kinetic_energy();
-        assert!(e_total.is_finite(), "step {step}: E_total is not finite");
-
-        let drift = (e_total - e_initial) / e_initial;
-        max_abs_drift = max_abs_drift.max(drift.abs());
-
-        if step < window {
-            head_sum += drift;
-        } else if step >= steps - window {
-            tail_sum += drift;
-        }
+        let energies = integrator::step(&mut sys, &ff, dt);
+        monitor.update(step, &sys, energies.total());
     }
 
-    EnergyStats {
-        max_abs_drift,
-        head_mean: head_sum / window as Real,
-        tail_mean: tail_sum / window as Real,
+    monitor.summary()
+}
+
+struct Chain4Result {
+    summary: EnergySummary,
+    gap_min: Real,
+    gap_max: Real,
+}
+
+fn run_chain4(dt: Real, steps: usize) -> Chain4Result {
+    let (mut sys, ff) = scenario::chain4();
+    let energies = integrator::initialize(&mut sys, &ff);
+    let mut monitor = EnergyMonitor::new(energies.total(), steps);
+
+    let mut gap_min = sys.distance(0, 3);
+    let mut gap_max = gap_min;
+
+    for step in 0..steps {
+        let energies = integrator::step(&mut sys, &ff, dt);
+        monitor.update(step, &sys, energies.total());
+
+        let gap = sys.distance(0, 3);
+        gap_min = gap_min.min(gap);
+        gap_max = gap_max.max(gap);
+    }
+
+    Chain4Result {
+        summary: monitor.summary(),
+        gap_min,
+        gap_max,
     }
 }
 
-fn run_chain4(dt: Real, steps: usize) -> (EnergyStats, Real) {
-    let (mut sys, bonds, pairs) = chain4_system();
+fn spring_1m() -> &'static EnergySummary {
+    static CACHE: OnceLock<EnergySummary> = OnceLock::new();
+    CACHE.get_or_init(|| run_spring(1e-3, 1_000_000))
+}
 
-    sys.clear_forces();
-    let mut e_pot = bond::accumulate(&mut sys, &bonds, K)
-        + repulsion::accumulate(&mut sys, &pairs, EPS, SIGMA);
-    let e_initial = e_pot + sys.kinetic_energy();
-
-    let window = steps / 10;
-    let mut head_sum = 0.0;
-    let mut tail_sum = 0.0;
-    let mut max_abs_drift: Real = 0.0;
-    let mut min_gap = sys.distance(0, 3);
-
-    for step in 0..steps {
-        integrator::kick_drift(&mut sys, dt);
-        sys.clear_forces();
-        e_pot = bond::accumulate(&mut sys, &bonds, K)
-            + repulsion::accumulate(&mut sys, &pairs, EPS, SIGMA);
-        integrator::kick(&mut sys, dt);
-
-        let e_total = e_pot + sys.kinetic_energy();
-        assert!(e_total.is_finite(), "step {step}: E_total is not finite");
-
-        let drift = (e_total - e_initial) / e_initial;
-        max_abs_drift = max_abs_drift.max(drift.abs());
-        min_gap = min_gap.min(sys.distance(0, 3));
-
-        if step < window {
-            head_sum += drift;
-        } else if step >= steps - window {
-            tail_sum += drift;
-        }
-    }
-
-    (
-        EnergyStats {
-            max_abs_drift,
-            head_mean: head_sum / window as Real,
-            tail_mean: tail_sum / window as Real,
-        },
-        min_gap,
-    )
+fn chain4_1m() -> &'static Chain4Result {
+    static CACHE: OnceLock<Chain4Result> = OnceLock::new();
+    CACHE.get_or_init(|| run_chain4(1e-3, 1_000_000))
 }
 
 #[test]
@@ -240,8 +177,8 @@ fn bond_force_matches_numerical_gradient() {
         let (mut sys, bonds) = random_chain(seed, 5, 12.0, MIN_SEPARATION);
         assert_numerical_gradient(
             &mut sys,
-            |s| bond::accumulate(s, &bonds, K),
-            |s| bond::energy(s, &bonds, K),
+            |s| bond::accumulate(s, &bonds, BOND_K),
+            |s| bond::energy(s, &bonds, BOND_K),
             &format!("bond seed {seed}"),
         );
     }
@@ -289,7 +226,7 @@ fn newton_third_law() {
         let pairs = PairList::all_pairs(sys.n, 3);
 
         sys.clear_forces();
-        bond::accumulate(&mut sys, &bonds, K);
+        bond::accumulate(&mut sys, &bonds, BOND_K);
         repulsion::accumulate(&mut sys, &pairs, EPS, SIGMA);
 
         let (fx, fy, fz) = sys.total_force();
@@ -317,73 +254,91 @@ fn pairlist_respects_sequence_separation() {
 }
 
 #[test]
-fn energy_oscillation_stays_bounded() {
-    let stats = run_two_bead(1e-3, 1_000_000);
+fn pairlist_never_emits_self_pairs() {
+    for sep in 0..3usize {
+        let pairs = PairList::all_pairs(6, sep);
+        for p in 0..pairs.len() {
+            assert_ne!(pairs.i[p], pairs.j[p], "self-pair from separation {sep}");
+        }
+    }
+}
+
+#[test]
+fn spring_energy_stays_bounded() {
+    let s = spring_1m();
+    assert!(s.is_finite(), "blew up at step {:?}", s.first_nonfinite);
     assert!(
-        stats.max_abs_drift < 5e-4,
+        s.max_abs_drift < 5e-4,
         "max |drift| = {:.3e}, expected < 5e-4",
-        stats.max_abs_drift
+        s.max_abs_drift
     );
 }
 
 #[test]
-fn energy_has_no_secular_drift() {
-    let stats = run_two_bead(1e-3, 1_000_000);
-    let secular = (stats.tail_mean - stats.head_mean).abs();
+fn spring_has_no_secular_drift() {
+    let s = spring_1m();
     assert!(
-        secular < 1e-6,
+        s.secular_drift() < 1e-6,
         "secular drift = {:.3e} (head {:.3e}, tail {:.3e}), expected < 1e-6",
-        secular,
-        stats.head_mean,
-        stats.tail_mean
+        s.secular_drift(),
+        s.head_mean,
+        s.tail_mean
     );
 }
 
 #[test]
-fn energy_conserved_with_bond_and_repulsion() {
-    let (stats, min_gap) = run_chain4(1e-3, 1_000_000);
-
+fn chain4_energy_is_conserved() {
+    let r = chain4_1m();
     assert!(
-        stats.max_abs_drift < 5e-4,
+        r.summary.is_finite(),
+        "blew up at step {:?}",
+        r.summary.first_nonfinite
+    );
+    assert!(
+        r.summary.max_abs_drift < 5e-4,
         "max |drift| = {:.3e}, expected < 5e-4",
-        stats.max_abs_drift
+        r.summary.max_abs_drift
     );
-
-    let secular = (stats.tail_mean - stats.head_mean).abs();
     assert!(
-        secular < 1e-6,
-        "secular drift = {:.3e} (head {:.3e}, tail {:.3e}), expected < 1e-6",
-        secular,
-        stats.head_mean,
-        stats.tail_mean
-    );
-
-    assert!(
-        min_gap <= R0 + 1e-9,
-        "min d(0,3) = {min_gap:.6}, repulsion never engaged"
+        r.summary.secular_drift() < 1e-6,
+        "secular drift = {:.3e}, expected < 1e-6",
+        r.summary.secular_drift()
     );
 }
 
 #[test]
-fn oscillation_matches_analytic_solution() {
+fn chain4_repulsion_actually_does_work() {
+    let r = chain4_1m();
+
+    assert!(
+        r.gap_max > R0 + 1e-3,
+        "d(0,3) max = {:.6}, never exceeded r0 = {R0}: only repulsion can push 0 and 3 \
+         apart, so a static gap means the term is inert",
+        r.gap_max
+    );
+
+    assert!(
+        r.gap_min < SIGMA,
+        "d(0,3) min = {:.6}, never entered the repulsive range sigma = {SIGMA}",
+        r.gap_min
+    );
+}
+
+#[test]
+fn spring_matches_analytic_solution() {
     const DT: Real = 1e-3;
     const STEPS: usize = 1_000_000;
     const INITIAL_SEPARATION: Real = 5.0;
 
-    let (mut sys, bonds) = two_bead_system(INITIAL_SEPARATION);
-
-    sys.clear_forces();
-    bond::accumulate(&mut sys, &bonds, K);
+    let (mut sys, ff) = scenario::spring(INITIAL_SEPARATION);
+    integrator::initialize(&mut sys, &ff);
 
     let mut tracker = PeriodTracker::new(sys.distance(0, 1) - R0, 0.0);
     let mut r_min = INITIAL_SEPARATION;
     let mut r_max = INITIAL_SEPARATION;
 
     for step in 0..STEPS {
-        integrator::kick_drift(&mut sys, DT);
-        sys.clear_forces();
-        bond::accumulate(&mut sys, &bonds, K);
-        integrator::kick(&mut sys, DT);
+        integrator::step(&mut sys, &ff, DT);
 
         let r = sys.distance(0, 1);
         r_min = r_min.min(r);
@@ -392,8 +347,8 @@ fn oscillation_matches_analytic_solution() {
     }
 
     let reduced_mass = 0.5;
-    let omega = (2.0 * K / reduced_mass).sqrt();
-    let theoretical = 2.0 * std::f64::consts::PI / omega;
+    let omega = (2.0 * BOND_K / reduced_mass).sqrt();
+    let theoretical = 2.0 * PI / omega;
     let measured = tracker.period().expect("no full period observed");
     let rel_error = (measured - theoretical).abs() / theoretical;
 
@@ -411,8 +366,8 @@ fn oscillation_matches_analytic_solution() {
 
 #[test]
 fn integrator_is_second_order() {
-    let coarse = run_two_bead(1e-3, 200_000).max_abs_drift;
-    let fine = run_two_bead(1e-4, 2_000_000).max_abs_drift;
+    let coarse = run_spring(1e-3, 200_000).max_abs_drift;
+    let fine = run_spring(1e-4, 2_000_000).max_abs_drift;
     let ratio = coarse / fine;
 
     assert!(

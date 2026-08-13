@@ -18,6 +18,8 @@ impl Bonds {
     }
 
     pub fn push(&mut self, i: u32, j: u32, r0: Real) {
+        assert!(i != j, "self-bond ({i}, {j}) is not a valid interaction");
+        assert!(r0 > 0.0, "bond ({i}, {j}) has non-positive r0 = {r0}");
         self.i.push(i);
         self.j.push(j);
         self.r0.push(r0);
@@ -29,6 +31,16 @@ impl Bonds {
 
     pub fn is_empty(&self) -> bool {
         self.i.is_empty()
+    }
+
+    pub fn validate(&self, n: usize) {
+        for b in 0..self.len() {
+            let (i, j) = (self.i[b] as usize, self.j[b] as usize);
+            assert!(
+                i < n && j < n,
+                "bond ({i}, {j}) out of range for system of {n} atoms"
+            );
+        }
     }
 }
 
@@ -52,6 +64,7 @@ pub fn accumulate(sys: &mut System, bonds: &Bonds, k: Real) -> Real {
         let r = (dx * dx + dy * dy + dz * dz).sqrt();
 
         if r < MIN_R {
+            e_pot += k * r0 * r0;
             continue;
         }
 
@@ -84,6 +97,7 @@ pub fn energy(sys: &System, bonds: &Bonds, k: Real) -> Real {
         let r = (dx * dx + dy * dy + dz * dz).sqrt();
 
         if r < MIN_R {
+            e_pot += k * r0 * r0;
             continue;
         }
 

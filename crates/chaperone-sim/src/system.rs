@@ -1,5 +1,7 @@
 pub type Real = f64;
 
+pub const PI: Real = std::f64::consts::PI;
+
 pub struct System {
     pub n: usize,
     pub pos_x: Vec<Real>,
@@ -48,13 +50,6 @@ impl System {
         e
     }
 
-    pub fn temperature(&self) -> Real {
-        if self.n == 0 {
-            return 0.0;
-        }
-        2.0 * self.kinetic_energy() / (3.0 * self.n as Real)
-    }
-
     pub fn distance(&self, i: usize, j: usize) -> Real {
         let dx = self.pos_x[j] - self.pos_x[i];
         let dy = self.pos_y[j] - self.pos_y[i];
@@ -68,5 +63,37 @@ impl System {
             self.frc_y.iter().sum(),
             self.frc_z.iter().sum(),
         )
+    }
+
+    pub fn max_force(&self) -> Real {
+        let mut m: Real = 0.0;
+        for i in 0..self.n {
+            let f = (self.frc_x[i] * self.frc_x[i]
+                + self.frc_y[i] * self.frc_y[i]
+                + self.frc_z[i] * self.frc_z[i])
+                .sqrt();
+            if f.is_finite() && f > m {
+                m = f;
+            } else if !f.is_finite() {
+                return Real::NAN;
+            }
+        }
+        m
+    }
+
+    pub fn max_speed(&self) -> Real {
+        let mut m: Real = 0.0;
+        for i in 0..self.n {
+            let v = (self.vel_x[i] * self.vel_x[i]
+                + self.vel_y[i] * self.vel_y[i]
+                + self.vel_z[i] * self.vel_z[i])
+                .sqrt();
+            if v.is_finite() && v > m {
+                m = v;
+            } else if !v.is_finite() {
+                return Real::NAN;
+            }
+        }
+        m
     }
 }
