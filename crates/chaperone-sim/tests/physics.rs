@@ -5,11 +5,14 @@ use chaperone_sim::analysis::{
 };
 use chaperone_sim::forcefield::angle::{self, Angles};
 use chaperone_sim::forcefield::bond::{self, Bonds};
+use chaperone_sim::forcefield::dihedral::{self, Dihedrals};
 use chaperone_sim::forcefield::native::{self, NativeContacts};
 use chaperone_sim::forcefield::pairlist::PairList;
 use chaperone_sim::forcefield::repulsion;
 use chaperone_sim::integrator;
-use chaperone_sim::scenario::{self, ANGLE_K, BOND_K, EPS, MIN_SEQUENCE_SEPARATION, R0, SIGMA};
+use chaperone_sim::scenario::{
+    self, ANGLE_K, BOND_K, EPS, K_PHI1, K_PHI3, MIN_SEQUENCE_SEPARATION, R0, SIGMA,
+};
 use chaperone_sim::system::{Real, System, PI};
 
 const MIN_SEPARATION: Real = 0.8 * SIGMA;
@@ -188,6 +191,7 @@ struct Chain5Result {
     summary: EnergySummary,
     max_bond: Real,
     max_angle: Real,
+    max_dihedral: Real,
     max_native_abs: Real,
     max_repulsion: Real,
 }
@@ -199,6 +203,7 @@ fn run_chain5(dt: Real, steps: usize) -> Chain5Result {
 
     let mut max_bond = initial.bond;
     let mut max_angle = initial.angle;
+    let mut max_dihedral = initial.dihedral;
     let mut max_native_abs = initial.native.abs();
     let mut max_repulsion = initial.repulsion;
 
@@ -208,6 +213,7 @@ fn run_chain5(dt: Real, steps: usize) -> Chain5Result {
 
         max_bond = max_bond.max(energies.bond);
         max_angle = max_angle.max(energies.angle);
+        max_dihedral = max_dihedral.max(energies.dihedral);
         max_native_abs = max_native_abs.max(energies.native.abs());
         max_repulsion = max_repulsion.max(energies.repulsion);
     }
@@ -216,6 +222,7 @@ fn run_chain5(dt: Real, steps: usize) -> Chain5Result {
         summary: monitor.summary(),
         max_bond,
         max_angle,
+        max_dihedral,
         max_native_abs,
         max_repulsion,
     }
@@ -600,6 +607,11 @@ fn chain5_exercises_every_term() {
         r.max_angle
     );
     assert!(
+        r.max_dihedral > 0.1,
+        "dihedral energy peaked at {:.3e}, term looks inert",
+        r.max_dihedral
+    );
+    assert!(
         r.max_native_abs > 1e-3,
         "native energy peaked at {:.3e}, term looks inert",
         r.max_native_abs
@@ -661,22 +673,25 @@ fn triples_are_well_conditioned(sys: &System, min_sin: Real) -> bool {
     (0..sys.n.saturating_sub(2)).all(|t| sys.angle(t, t + 1, t + 2).sin() >= min_sin)
 }
 
-fn random_angle_chain(seed: u64, n: usize, delta: Real) -> (System, Angles) {
+fn random_conditioned_chain(seed: u64, n: usize, delta: Real) -> (System, System) {
     for attempt in 0..64u64 {
         let (mut sys, _, mut rng) = random_chain(seed * 64 + attempt, n, 12.0, MIN_SEPARATION);
         if !triples_are_well_conditioned(&sys, MIN_TRIPLE_SIN) {
             continue;
         }
-        let angles = Angles::from_chain(&sys);
-        let (px, py, pz) = (sys.pos_x.clone(), sys.pos_y.clone(), sys.pos_z.clone());
+
+        let mut native = System::new(n);
+        native.pos_x.copy_from_slice(&sys.pos_x);
+        native.pos_y.copy_from_slice(&sys.pos_y);
+        native.pos_z.copy_from_slice(&sys.pos_z);
 
         for _ in 0..64 {
-            sys.pos_x.copy_from_slice(&px);
-            sys.pos_y.copy_from_slice(&py);
-            sys.pos_z.copy_from_slice(&pz);
+            sys.pos_x.copy_from_slice(&native.pos_x);
+            sys.pos_y.copy_from_slice(&native.pos_y);
+            sys.pos_z.copy_from_slice(&native.pos_z);
             shake(&mut sys, &mut rng, delta);
             if triples_are_well_conditioned(&sys, MIN_TRIPLE_SIN) {
-                return (sys, angles);
+                return (sys, native);
             }
         }
     }
@@ -689,7 +704,8 @@ fn angle_force_matches_numerical_gradient() {
     let mut narrower = 0usize;
 
     for seed in 0..20u64 {
-        let (mut sys, angles) = random_angle_chain(seed, 5, 0.3);
+        let (mut sys, native) = random_conditioned_chain(seed, 5, 0.3);
+        let angles = Angles::from_chain(&native);
 
         for t in 0..angles.len() {
             let theta = sys.angle(
@@ -722,7 +738,8 @@ fn angle_force_matches_numerical_gradient() {
 #[test]
 fn angle_produces_no_net_force_or_torque() {
     for seed in 0..20u64 {
-        let (mut sys, angles) = random_angle_chain(seed, 5, 0.3);
+        let (mut sys, native) = random_conditioned_chain(seed, 5, 0.3);
+        let angles = Angles::from_chain(&native);
         sys.clear_forces();
         angle::accumulate(&mut sys, &angles, ANGLE_K);
 
@@ -892,6 +909,358 @@ fn chain5_conserves_angular_momentum() {
         "max |L - L0| = {:.3e}, expected < 1e-9; velocity Verlet conserves L exactly when \
          the total torque vanishes, so any growth means a force term produces net torque",
         r.summary.max_angular_momentum_drift
+    );
+}
+
+fn torsion_frame(i: [Real; 3], j: [Real; 3], k: [Real; 3], l: [Real; 3]) -> System {
+    let mut sys = System::new(4);
+    for (idx, p) in [i, j, k, l].iter().enumerate() {
+        sys.pos_x[idx] = p[0];
+        sys.pos_y[idx] = p[1];
+        sys.pos_z[idx] = p[2];
+    }
+    sys
+}
+
+fn assert_forces_match(sys: &System, expected: &[[Real; 3]], tol: Real, label: &str) {
+    for (i, want) in expected.iter().enumerate() {
+        let got = [sys.frc_x[i], sys.frc_y[i], sys.frc_z[i]];
+        for dim in 0..3 {
+            assert!(
+                (got[dim] - want[dim]).abs() < tol,
+                "{label} bead {i} dim {dim}: got {:.15}, expected {:.15}",
+                got[dim],
+                want[dim]
+            );
+        }
+    }
+}
+
+#[test]
+fn dihedral_force_matches_numerical_gradient() {
+    let mut wider = 0usize;
+    let mut narrower = 0usize;
+
+    for seed in 0..20u64 {
+        let (mut sys, native) = random_conditioned_chain(seed, 6, 0.3);
+        let dihedrals = Dihedrals::from_chain(&native);
+        assert!(!dihedrals.is_empty(), "seed {seed}: no dihedrals built");
+
+        for t in 0..dihedrals.len() {
+            let phi = sys.dihedral(
+                dihedrals.i[t] as usize,
+                dihedrals.j[t] as usize,
+                dihedrals.k[t] as usize,
+                dihedrals.l[t] as usize,
+            );
+            if phi > dihedrals.phi0[t] {
+                wider += 1;
+            } else {
+                narrower += 1;
+            }
+        }
+
+        assert_numerical_gradient(
+            &mut sys,
+            |s| dihedral::accumulate(s, &dihedrals, K_PHI1, K_PHI3),
+            |s| dihedral::energy(s, &dihedrals, K_PHI1, K_PHI3),
+            &format!("dihedral seed {seed}"),
+        );
+    }
+
+    assert!(
+        wider > 0 && narrower > 0,
+        "shaken chains covered only one branch (phi > phi0: {wider}, phi < phi0: {narrower})"
+    );
+}
+
+#[test]
+fn dihedral_matches_closed_form_perpendicular() {
+    let psi: Real = 0.9;
+    let mut sys = torsion_frame(
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, psi.cos(), psi.sin()],
+    );
+
+    let phi = sys.dihedral(0, 1, 2, 3);
+    assert!(
+        (phi - psi).abs() < 1e-14,
+        "phi = {phi:.15}, expected {psi:.15}"
+    );
+
+    let mut dihedrals = Dihedrals::new();
+    dihedrals.push(0, 1, 2, 3, psi - 0.4);
+
+    sys.clear_forces();
+    let e = dihedral::accumulate(&mut sys, &dihedrals, 1.0, 0.5);
+    assert!(
+        (e - 0.397760128758778).abs() < 1e-12,
+        "V = {e:.15}, expected 0.397760128758778"
+    );
+
+    let fi = [0.0, 0.0, 1.78747697125949];
+    let fk = [0.0, -1.40017881192699, 1.111113503389155];
+    assert_forces_match(
+        &sys,
+        &[fi, [-fi[0], -fi[1], -fi[2]], fk, [-fk[0], -fk[1], -fk[2]]],
+        1e-12,
+        "perpendicular",
+    );
+}
+
+#[test]
+fn dihedral_matches_closed_form_skewed() {
+    let mut sys = torsion_frame(
+        [-0.5, 1.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.6, 0.8, 0.9],
+    );
+
+    let phi = sys.dihedral(0, 1, 2, 3);
+    assert!(
+        (phi - 0.844153986113171).abs() < 1e-12,
+        "phi = {phi:.15}, expected 0.844153986113171"
+    );
+
+    let mut dihedrals = Dihedrals::new();
+    dihedrals.push(0, 1, 2, 3, 0.444153986113171);
+
+    sys.clear_forces();
+    let e = dihedral::accumulate(&mut sys, &dihedrals, 1.0, 0.5);
+    assert!(
+        (e - 0.397760128758778).abs() < 1e-12,
+        "V = {e:.15}, expected 0.397760128758778"
+    );
+
+    assert_forces_match(
+        &sys,
+        &[
+            [0.0, 0.0, 1.78747697125949],
+            [0.0, 0.332840539475905, -2.530204471386278],
+            [0.0, -1.442309004395589, 1.728921691166507],
+            [0.0, 1.109468464919684, -0.986194191039719],
+        ],
+        1e-11,
+        "skewed",
+    );
+}
+
+#[test]
+fn dihedral_force_magnitude_identity_holds() {
+    for seed in 0..20u64 {
+        let (mut sys, native) = random_conditioned_chain(seed, 4, 0.3);
+        let dihedrals = Dihedrals::from_chain(&native);
+
+        let phi = sys.dihedral(0, 1, 2, 3);
+        let dphi = phi - dihedrals.phi0[0];
+        let dv = (K_PHI1 * dphi.sin() + 3.0 * K_PHI3 * (3.0 * dphi).sin()).abs();
+
+        sys.clear_forces();
+        dihedral::accumulate(&mut sys, &dihedrals, K_PHI1, K_PHI3);
+
+        let b1 = [
+            sys.pos_x[1] - sys.pos_x[0],
+            sys.pos_y[1] - sys.pos_y[0],
+            sys.pos_z[1] - sys.pos_z[0],
+        ];
+        let b2 = [
+            sys.pos_x[2] - sys.pos_x[1],
+            sys.pos_y[2] - sys.pos_y[1],
+            sys.pos_z[2] - sys.pos_z[1],
+        ];
+        let n1 = [
+            b1[1] * b2[2] - b1[2] * b2[1],
+            b1[2] * b2[0] - b1[0] * b2[2],
+            b1[0] * b2[1] - b1[1] * b2[0],
+        ];
+        let n1_len = (n1[0] * n1[0] + n1[1] * n1[1] + n1[2] * n1[2]).sqrt();
+        let b2_len = (b2[0] * b2[0] + b2[1] * b2[1] + b2[2] * b2[2]).sqrt();
+
+        let f_i = (sys.frc_x[0] * sys.frc_x[0]
+            + sys.frc_y[0] * sys.frc_y[0]
+            + sys.frc_z[0] * sys.frc_z[0])
+            .sqrt();
+
+        let lhs = f_i * n1_len;
+        let rhs = dv * b2_len;
+        assert!(
+            (lhs - rhs).abs() < 1e-9 * rhs.max(1.0),
+            "seed {seed}: |F_i|.|n1| = {lhs:.12} but |dV/dphi|.|b2| = {rhs:.12}; \
+             the |b2| factor is missing"
+        );
+
+        let dot_b1 = sys.frc_x[0] * b1[0] + sys.frc_y[0] * b1[1] + sys.frc_z[0] * b1[2];
+        let dot_b2 = sys.frc_x[0] * b2[0] + sys.frc_y[0] * b2[1] + sys.frc_z[0] * b2[2];
+        assert!(
+            dot_b1.abs() < 1e-9 && dot_b2.abs() < 1e-9,
+            "seed {seed}: F_i is not perpendicular to the i-j-k plane normal"
+        );
+    }
+}
+
+#[test]
+fn dihedral_is_periodic_in_phi0() {
+    let psi: Real = 0.9;
+    let build = |phi0: Real| {
+        let mut sys = torsion_frame(
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, psi.cos(), psi.sin()],
+        );
+        let mut dihedrals = Dihedrals::new();
+        dihedrals.push(0, 1, 2, 3, phi0);
+        sys.clear_forces();
+        let e = dihedral::accumulate(&mut sys, &dihedrals, K_PHI1, K_PHI3);
+        (sys, e)
+    };
+
+    let (a, ea) = build(0.5);
+    let (b, eb) = build(0.5 + 2.0 * PI);
+
+    assert!(
+        (ea - eb).abs() < 1e-13,
+        "V differs by 2*pi shift: {ea:.15} vs {eb:.15}"
+    );
+    for i in 0..4 {
+        assert!(
+            (a.frc_x[i] - b.frc_x[i]).abs() < 1e-12
+                && (a.frc_y[i] - b.frc_y[i]).abs() < 1e-12
+                && (a.frc_z[i] - b.frc_z[i]).abs() < 1e-12,
+            "bead {i} force differs by 2*pi shift"
+        );
+    }
+}
+
+#[test]
+fn dihedral_profile_matches_one_and_three_fold_terms() {
+    for step in 0..40 {
+        let psi = -PI + (step as Real + 0.5) * (2.0 * PI / 40.0);
+        let mut sys = torsion_frame(
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, psi.cos(), psi.sin()],
+        );
+
+        let mut dihedrals = Dihedrals::new();
+        dihedrals.push(0, 1, 2, 3, 0.0);
+
+        sys.clear_forces();
+        let e = dihedral::accumulate(&mut sys, &dihedrals, K_PHI1, K_PHI3);
+
+        let expected_e = K_PHI1 * (1.0 - psi.cos()) + K_PHI3 * (1.0 - (3.0 * psi).cos());
+        assert!(
+            (e - expected_e).abs() < 1e-12,
+            "psi = {psi:.6}: V = {e:.12}, expected {expected_e:.12}"
+        );
+
+        let expected_dv = (K_PHI1 * psi.sin() + 3.0 * K_PHI3 * (3.0 * psi).sin()).abs();
+        let f_i = (sys.frc_x[0] * sys.frc_x[0]
+            + sys.frc_y[0] * sys.frc_y[0]
+            + sys.frc_z[0] * sys.frc_z[0])
+            .sqrt();
+        assert!(
+            (f_i - expected_dv).abs() < 1e-12,
+            "psi = {psi:.6}: |F_i| = {f_i:.12}, expected |dV/dphi| = {expected_dv:.12}; \
+             the 3-fold term factor of 3 is wrong"
+        );
+    }
+}
+
+#[test]
+fn dihedral_produces_no_net_force_or_torque() {
+    for seed in 0..20u64 {
+        let (mut sys, native) = random_conditioned_chain(seed, 6, 0.3);
+        let dihedrals = Dihedrals::from_chain(&native);
+
+        sys.clear_forces();
+        dihedral::accumulate(&mut sys, &dihedrals, K_PHI1, K_PHI3);
+
+        let (fx, fy, fz) = sys.total_force();
+        assert!(
+            fx.abs() < 1e-9 && fy.abs() < 1e-9 && fz.abs() < 1e-9,
+            "seed {seed}: net force ({fx:.3e}, {fy:.3e}, {fz:.3e})"
+        );
+
+        let (tx, ty, tz) = sys.total_torque();
+        assert!(
+            tx.abs() < 1e-9 && ty.abs() < 1e-9 && tz.abs() < 1e-9,
+            "seed {seed}: net torque ({tx:.3e}, {ty:.3e}, {tz:.3e}); the F_j / F_k \
+             redistribution coefficients are wrong"
+        );
+
+        for i in 0..sys.n {
+            sys.pos_x[i] += 100.0;
+            sys.pos_y[i] -= 37.0;
+            sys.pos_z[i] += 5.0;
+        }
+        let (sx, sy, sz) = sys.total_torque();
+        assert!(
+            (sx - tx).abs() < 1e-7 && (sy - ty).abs() < 1e-7 && (sz - tz).abs() < 1e-7,
+            "seed {seed}: torque depends on origin choice"
+        );
+    }
+}
+
+#[test]
+fn dihedral_is_skipped_at_a_collinear_geometry() {
+    let mut sys = torsion_frame(
+        [-3.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [4.0, 1.0, 1.0],
+    );
+
+    let mut dihedrals = Dihedrals::new();
+    dihedrals.push(0, 1, 2, 3, 0.7);
+
+    sys.clear_forces();
+    let e = dihedral::accumulate(&mut sys, &dihedrals, K_PHI1, K_PHI3);
+
+    assert_eq!(e, 0.0, "a collinear i-j-k must be skipped, not evaluated");
+    for i in 0..4 {
+        assert_eq!(sys.frc_x[i], 0.0);
+        assert_eq!(sys.frc_y[i], 0.0);
+        assert_eq!(sys.frc_z[i], 0.0);
+    }
+}
+
+#[test]
+fn native_structure_is_a_bonded_force_free_state() {
+    let (mut sys, ff) = scenario::chain5();
+
+    type TermFn = fn(&mut System, &chaperone_sim::ForceField) -> Real;
+    let terms: [(&str, TermFn); 4] = [
+        ("bond", |s, f| bond::accumulate(s, &f.bonds, f.bond_k)),
+        ("angle", |s, f| angle::accumulate(s, &f.angles, f.angle_k)),
+        ("dihedral", |s, f| {
+            dihedral::accumulate(s, &f.dihedrals, f.k_phi1, f.k_phi3)
+        }),
+        ("native", |s, f| native::accumulate(s, &f.native, f.eps)),
+    ];
+
+    for (name, term) in terms {
+        sys.clear_forces();
+        let e = term(&mut sys, &ff);
+        let f = sys.max_force();
+        assert!(
+            f < 1e-9,
+            "{name}: max |F| = {f:.3e} at the native structure (E = {e:.6}); the parameters \
+             recovered by from_structure do not round-trip through the force routine"
+        );
+    }
+
+    sys.clear_forces();
+    repulsion::accumulate(&mut sys, &ff.repulsion_pairs, ff.eps, ff.sigma);
+    let f = sys.max_force();
+    assert!(
+        f.is_finite() && f > 0.0,
+        "non-native repulsion should be the only term with force at the native structure, \
+         got max |F| = {f:.3e}"
     );
 }
 

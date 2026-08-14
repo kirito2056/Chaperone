@@ -71,6 +71,39 @@ impl System {
         cos.acos()
     }
 
+    pub fn dihedral(&self, i: usize, j: usize, k: usize, l: usize) -> Real {
+        let b1 = [
+            self.pos_x[j] - self.pos_x[i],
+            self.pos_y[j] - self.pos_y[i],
+            self.pos_z[j] - self.pos_z[i],
+        ];
+        let b2 = [
+            self.pos_x[k] - self.pos_x[j],
+            self.pos_y[k] - self.pos_y[j],
+            self.pos_z[k] - self.pos_z[j],
+        ];
+        let b3 = [
+            self.pos_x[l] - self.pos_x[k],
+            self.pos_y[l] - self.pos_y[k],
+            self.pos_z[l] - self.pos_z[k],
+        ];
+
+        let cross = |u: [Real; 3], v: [Real; 3]| {
+            [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ]
+        };
+        let dot = |u: [Real; 3], v: [Real; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+
+        let n1 = cross(b1, b2);
+        let n2 = cross(b2, b3);
+        let b2_len = dot(b2, b2).sqrt();
+
+        (b2_len * dot(b1, n2)).atan2(dot(n1, n2))
+    }
+
     pub fn angular_momentum(&self) -> (Real, Real, Real) {
         let mut lx = 0.0;
         let mut ly = 0.0;

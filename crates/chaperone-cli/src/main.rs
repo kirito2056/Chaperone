@@ -181,11 +181,12 @@ fn run_chain5() {
     let mut monitor = EnergyMonitor::new(&sys, e_initial, steps);
     let mut max_bond = initial.bond;
     let mut max_angle = initial.angle;
+    let mut max_dihedral = initial.dihedral;
     let mut max_native_abs = initial.native.abs();
     let mut max_repulsion = initial.repulsion;
     let mut q_min = 1.0;
 
-    println!("step,time,q,e_bond,e_angle,e_native,e_rep,e_kin,e_total,drift");
+    println!("step,time,q,e_bond,e_angle,e_dih,e_native,e_rep,e_kin,e_total,drift");
 
     let start = std::time::Instant::now();
 
@@ -196,6 +197,7 @@ fn run_chain5() {
 
         max_bond = max_bond.max(energies.bond);
         max_angle = max_angle.max(energies.angle);
+        max_dihedral = max_dihedral.max(energies.dihedral);
         max_native_abs = max_native_abs.max(energies.native.abs());
         max_repulsion = max_repulsion.max(energies.repulsion);
 
@@ -204,11 +206,12 @@ fn run_chain5() {
 
         if (step + 1) % SAMPLE_EVERY == 0 {
             println!(
-                "{},{:.6},{q:.4},{:.9},{:.9},{:.9},{:.9},{:.9},{e_total:.9},{drift:.3e}",
+                "{},{:.6},{q:.4},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{e_total:.9},{drift:.3e}",
                 step + 1,
                 (step + 1) as Real * DT,
                 energies.bond,
                 energies.angle,
+                energies.dihedral,
                 energies.native,
                 energies.repulsion,
                 energies.kinetic
@@ -220,10 +223,12 @@ fn run_chain5() {
     report(&monitor.summary(), steps, elapsed);
 
     eprintln!();
+    eprintln!("dihedrals            {}", ff.dihedrals.len());
     eprintln!("native contacts      {}", ff.native.len());
     eprintln!("non-native pairs     {}", ff.repulsion_pairs.len());
     eprintln!("peak |E_bond|        {max_bond:.6}");
     eprintln!("peak |E_angle|       {max_angle:.6}");
+    eprintln!("peak |E_dihedral|    {max_dihedral:.6}");
     eprintln!("peak |E_native|      {max_native_abs:.6}");
     eprintln!("peak |E_rep|         {max_repulsion:.6}");
     eprintln!("Q min                {q_min:.4}");
