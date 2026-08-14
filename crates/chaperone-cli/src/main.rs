@@ -116,9 +116,9 @@ fn run_spring() {
     );
 }
 
-fn run_chain4() {
+fn run_chain4(gap: Real) {
     let steps = steps();
-    let (mut sys, ff) = scenario::chain4();
+    let (mut sys, ff) = scenario::chain4_with_gap(gap);
     let energies = integrator::initialize(&mut sys, &ff);
     let e_initial = energies.total();
 
@@ -224,11 +224,12 @@ fn run_chain5() {
 fn main() {
     match std::env::args().nth(1).as_deref() {
         None | Some("spring") => run_spring(),
-        Some("chain4") => run_chain4(),
+        Some("chain4") => run_chain4(R0),
+        Some("chain4-open") => run_chain4(4.5),
         Some("chain5") => run_chain5(),
         Some(other) => {
             eprintln!("unknown scenario: {other}");
-            eprintln!("usage: chaperone [spring|chain4|chain5]");
+            eprintln!("usage: chaperone [spring|chain4|chain4-open|chain5] [steps]");
             std::process::exit(1);
         }
     }

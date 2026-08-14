@@ -21,8 +21,18 @@ pub fn spring(initial_separation: Real) -> (System, ForceField) {
 }
 
 pub fn chain4() -> (System, ForceField) {
+    chain4_with_gap(R0)
+}
+
+pub fn chain4_with_gap(gap: Real) -> (System, ForceField) {
+    assert!(
+        (gap - R0).abs() < 2.0 * R0,
+        "gap {gap} is unreachable with bond length {R0}"
+    );
     let mut sys = System::new(4);
-    let corners = [(0.0, 0.0), (R0, 0.0), (R0, R0), (0.0, R0)];
+    let b = (gap - R0) / 2.0;
+    let a = (R0 * R0 - b * b).sqrt();
+    let corners = [(0.0, 0.0), (a, b), (a, gap - b), (0.0, gap)];
     for (i, (x, y)) in corners.iter().enumerate() {
         sys.pos_x[i] = *x;
         sys.pos_y[i] = *y;
