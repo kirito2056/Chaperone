@@ -1,6 +1,7 @@
 use crate::system::{Real, System};
 
 const MIN_SIN: Real = 1e-8;
+const MIN_BUILD_SIN: Real = 1e-3;
 const MIN_LEN2: Real = 1e-24;
 
 pub struct Dihedrals {
@@ -68,6 +69,15 @@ impl Dihedrals {
     pub fn from_chain(native: &System) -> Self {
         let mut dihedrals = Dihedrals::new();
         for t in 0..native.n.saturating_sub(3) {
+            for (a, b, c) in [(t, t + 1, t + 2), (t + 1, t + 2, t + 3)] {
+                let sin = native.angle(a, b, c).sin();
+                assert!(
+                    sin >= MIN_BUILD_SIN,
+                    "triple ({a}, {b}, {c}) is nearly collinear (sin = {sin:.3e}); phi0 for \
+                     the quadruple at {t} would be ill-conditioned and the term would be \
+                     silently skipped at runtime"
+                );
+            }
             let phi0 = native.dihedral(t, t + 1, t + 2, t + 3);
             dihedrals.push(
                 t as u32,

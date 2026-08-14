@@ -1207,6 +1207,24 @@ fn dihedral_produces_no_net_force_or_torque() {
 }
 
 #[test]
+#[should_panic(expected = "nearly collinear")]
+fn dihedral_from_chain_rejects_a_collinear_native_structure() {
+    let sys = torsion_frame(
+        [0.0, 0.0, 0.0],
+        [3.8, 0.0, 0.0],
+        [7.6, 0.0, 0.0],
+        [7.6, 3.8, 0.0],
+    );
+    Dihedrals::from_chain(&sys);
+}
+
+#[test]
+fn dihedral_from_chain_accepts_a_bent_native_structure() {
+    let (_, ff) = scenario::chain5();
+    assert_eq!(ff.dihedrals.len(), 2);
+}
+
+#[test]
 fn dihedral_is_skipped_at_a_collinear_geometry() {
     let mut sys = torsion_frame(
         [-3.0, 0.0, 0.0],
