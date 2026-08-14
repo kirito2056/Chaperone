@@ -42,6 +42,10 @@ fn report(summary: &EnergySummary, steps: usize, elapsed: std::time::Duration) {
     );
     eprintln!();
     eprintln!("max |F|              {:.3e}", summary.max_force);
+    eprintln!(
+        "max |L - L0|         {:.3e}   (limit 1e-9)",
+        summary.max_angular_momentum_drift
+    );
     eprintln!("max |v|              {:.3e}", summary.max_speed);
     match summary.first_nonfinite {
         None => eprintln!("finite               ok"),
@@ -56,7 +60,7 @@ fn run_spring() {
     let energies = integrator::initialize(&mut sys, &ff);
     let e_initial = energies.total();
 
-    let mut monitor = EnergyMonitor::new(e_initial, steps);
+    let mut monitor = EnergyMonitor::new(&sys, e_initial, steps);
     let mut tracker = PeriodTracker::new(sys.distance(0, 1) - R0, 0.0);
     let mut r_min = initial_separation;
     let mut r_max = initial_separation;
@@ -122,7 +126,7 @@ fn run_chain4(gap: Real) {
     let energies = integrator::initialize(&mut sys, &ff);
     let e_initial = energies.total();
 
-    let mut monitor = EnergyMonitor::new(e_initial, steps);
+    let mut monitor = EnergyMonitor::new(&sys, e_initial, steps);
     let mut gap_min = sys.distance(0, 3);
     let mut gap_max = gap_min;
 
@@ -174,13 +178,14 @@ fn run_chain5() {
     let initial = integrator::initialize(&mut sys, &ff);
     let e_initial = initial.total();
 
-    let mut monitor = EnergyMonitor::new(e_initial, steps);
+    let mut monitor = EnergyMonitor::new(&sys, e_initial, steps);
     let mut max_bond = initial.bond;
+    let mut max_angle = initial.angle;
     let mut max_native_abs = initial.native.abs();
     let mut max_repulsion = initial.repulsion;
     let mut q_min = 1.0;
 
-    println!("step,time,q,e_bond,e_native,e_rep,e_kin,e_total,drift");
+    println!("step,time,q,e_bond,e_angle,e_native,e_rep,e_kin,e_total,drift");
 
     let start = std::time::Instant::now();
 
@@ -190,6 +195,7 @@ fn run_chain5() {
         let drift = monitor.update(step, &sys, e_total);
 
         max_bond = max_bond.max(energies.bond);
+        max_angle = max_angle.max(energies.angle);
         max_native_abs = max_native_abs.max(energies.native.abs());
         max_repulsion = max_repulsion.max(energies.repulsion);
 
@@ -198,10 +204,11 @@ fn run_chain5() {
 
         if (step + 1) % SAMPLE_EVERY == 0 {
             println!(
-                "{},{:.6},{q:.4},{:.9},{:.9},{:.9},{:.9},{e_total:.9},{drift:.3e}",
+                "{},{:.6},{q:.4},{:.9},{:.9},{:.9},{:.9},{:.9},{e_total:.9},{drift:.3e}",
                 step + 1,
                 (step + 1) as Real * DT,
                 energies.bond,
+                energies.angle,
                 energies.native,
                 energies.repulsion,
                 energies.kinetic
@@ -216,6 +223,7 @@ fn run_chain5() {
     eprintln!("native contacts      {}", ff.native.len());
     eprintln!("non-native pairs     {}", ff.repulsion_pairs.len());
     eprintln!("peak |E_bond|        {max_bond:.6}");
+    eprintln!("peak |E_angle|       {max_angle:.6}");
     eprintln!("peak |E_native|      {max_native_abs:.6}");
     eprintln!("peak |E_rep|         {max_repulsion:.6}");
     eprintln!("Q min                {q_min:.4}");

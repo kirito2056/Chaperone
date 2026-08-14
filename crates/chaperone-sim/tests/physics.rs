@@ -3,15 +3,17 @@ use std::sync::OnceLock;
 use chaperone_sim::analysis::{
     fraction_of_native_contacts, EnergyMonitor, EnergySummary, PeriodTracker, CONTACT_TOLERANCE,
 };
+use chaperone_sim::forcefield::angle::{self, Angles};
 use chaperone_sim::forcefield::bond::{self, Bonds};
 use chaperone_sim::forcefield::native::{self, NativeContacts};
 use chaperone_sim::forcefield::pairlist::PairList;
 use chaperone_sim::forcefield::repulsion;
 use chaperone_sim::integrator;
-use chaperone_sim::scenario::{self, BOND_K, EPS, MIN_SEQUENCE_SEPARATION, R0, SIGMA};
+use chaperone_sim::scenario::{self, ANGLE_K, BOND_K, EPS, MIN_SEQUENCE_SEPARATION, R0, SIGMA};
 use chaperone_sim::system::{Real, System, PI};
 
 const MIN_SEPARATION: Real = 0.8 * SIGMA;
+const MIN_TRIPLE_SIN: Real = 0.2;
 
 struct Lcg(u64);
 
@@ -132,7 +134,7 @@ where
 fn run_spring(dt: Real, steps: usize) -> EnergySummary {
     let (mut sys, ff) = scenario::spring(5.0);
     let energies = integrator::initialize(&mut sys, &ff);
-    let mut monitor = EnergyMonitor::new(energies.total(), steps);
+    let mut monitor = EnergyMonitor::new(&sys, energies.total(), steps);
 
     for step in 0..steps {
         let energies = integrator::step(&mut sys, &ff, dt);
@@ -151,7 +153,7 @@ struct Chain4Result {
 fn run_chain4(dt: Real, steps: usize) -> Chain4Result {
     let (mut sys, ff) = scenario::chain4();
     let energies = integrator::initialize(&mut sys, &ff);
-    let mut monitor = EnergyMonitor::new(energies.total(), steps);
+    let mut monitor = EnergyMonitor::new(&sys, energies.total(), steps);
 
     let mut gap_min = sys.distance(0, 3);
     let mut gap_max = gap_min;
@@ -185,6 +187,7 @@ fn chain4_1m() -> &'static Chain4Result {
 struct Chain5Result {
     summary: EnergySummary,
     max_bond: Real,
+    max_angle: Real,
     max_native_abs: Real,
     max_repulsion: Real,
 }
@@ -192,9 +195,10 @@ struct Chain5Result {
 fn run_chain5(dt: Real, steps: usize) -> Chain5Result {
     let (mut sys, ff) = scenario::chain5();
     let initial = integrator::initialize(&mut sys, &ff);
-    let mut monitor = EnergyMonitor::new(initial.total(), steps);
+    let mut monitor = EnergyMonitor::new(&sys, initial.total(), steps);
 
     let mut max_bond = initial.bond;
+    let mut max_angle = initial.angle;
     let mut max_native_abs = initial.native.abs();
     let mut max_repulsion = initial.repulsion;
 
@@ -203,6 +207,7 @@ fn run_chain5(dt: Real, steps: usize) -> Chain5Result {
         monitor.update(step, &sys, energies.total());
 
         max_bond = max_bond.max(energies.bond);
+        max_angle = max_angle.max(energies.angle);
         max_native_abs = max_native_abs.max(energies.native.abs());
         max_repulsion = max_repulsion.max(energies.repulsion);
     }
@@ -210,6 +215,7 @@ fn run_chain5(dt: Real, steps: usize) -> Chain5Result {
     Chain5Result {
         summary: monitor.summary(),
         max_bond,
+        max_angle,
         max_native_abs,
         max_repulsion,
     }
@@ -580,13 +586,18 @@ fn chain5_energy_is_conserved() {
 }
 
 #[test]
-fn chain5_exercises_all_three_terms() {
+fn chain5_exercises_every_term() {
     let r = chain5_1m();
 
     assert!(
         r.max_bond > 1e-3,
         "bond energy peaked at {:.3e}, term looks inert",
         r.max_bond
+    );
+    assert!(
+        r.max_angle > 0.1,
+        "angle energy peaked at {:.3e}, term looks inert",
+        r.max_angle
     );
     assert!(
         r.max_native_abs > 1e-3,
@@ -644,6 +655,244 @@ fn q_is_none_without_contacts() {
     let sys = System::new(2);
     let contacts = NativeContacts::new();
     assert!(fraction_of_native_contacts(&sys, &contacts, CONTACT_TOLERANCE).is_none());
+}
+
+fn triples_are_well_conditioned(sys: &System, min_sin: Real) -> bool {
+    (0..sys.n.saturating_sub(2)).all(|t| sys.angle(t, t + 1, t + 2).sin() >= min_sin)
+}
+
+fn random_angle_chain(seed: u64, n: usize, delta: Real) -> (System, Angles) {
+    for attempt in 0..64u64 {
+        let (mut sys, _, mut rng) = random_chain(seed * 64 + attempt, n, 12.0, MIN_SEPARATION);
+        if !triples_are_well_conditioned(&sys, MIN_TRIPLE_SIN) {
+            continue;
+        }
+        let angles = Angles::from_chain(&sys);
+        let (px, py, pz) = (sys.pos_x.clone(), sys.pos_y.clone(), sys.pos_z.clone());
+
+        for _ in 0..64 {
+            sys.pos_x.copy_from_slice(&px);
+            sys.pos_y.copy_from_slice(&py);
+            sys.pos_z.copy_from_slice(&pz);
+            shake(&mut sys, &mut rng, delta);
+            if triples_are_well_conditioned(&sys, MIN_TRIPLE_SIN) {
+                return (sys, angles);
+            }
+        }
+    }
+    panic!("seed {seed}: could not build a chain with all triple sines >= {MIN_TRIPLE_SIN}");
+}
+
+#[test]
+fn angle_force_matches_numerical_gradient() {
+    let mut wider = 0usize;
+    let mut narrower = 0usize;
+
+    for seed in 0..20u64 {
+        let (mut sys, angles) = random_angle_chain(seed, 5, 0.3);
+
+        for t in 0..angles.len() {
+            let theta = sys.angle(
+                angles.i[t] as usize,
+                angles.j[t] as usize,
+                angles.k[t] as usize,
+            );
+            if theta > angles.theta0[t] {
+                wider += 1;
+            } else {
+                narrower += 1;
+            }
+        }
+
+        assert_numerical_gradient(
+            &mut sys,
+            |s| angle::accumulate(s, &angles, ANGLE_K),
+            |s| angle::energy(s, &angles, ANGLE_K),
+            &format!("angle seed {seed}"),
+        );
+    }
+
+    assert!(
+        wider > 0 && narrower > 0,
+        "shaken chains covered only one branch (theta > theta0: {wider}, theta < theta0: \
+         {narrower}); both restoring directions must be exercised"
+    );
+}
+
+#[test]
+fn angle_produces_no_net_force_or_torque() {
+    for seed in 0..20u64 {
+        let (mut sys, angles) = random_angle_chain(seed, 5, 0.3);
+        sys.clear_forces();
+        angle::accumulate(&mut sys, &angles, ANGLE_K);
+
+        let (fx, fy, fz) = sys.total_force();
+        assert!(
+            fx.abs() < 1e-9 && fy.abs() < 1e-9 && fz.abs() < 1e-9,
+            "seed {seed}: net force ({fx:.3e}, {fy:.3e}, {fz:.3e})"
+        );
+
+        let (tx, ty, tz) = sys.total_torque();
+        assert!(
+            tx.abs() < 1e-9 && ty.abs() < 1e-9 && tz.abs() < 1e-9,
+            "seed {seed}: net torque ({tx:.3e}, {ty:.3e}, {tz:.3e})"
+        );
+
+        for i in 0..sys.n {
+            sys.pos_x[i] += 100.0;
+            sys.pos_y[i] -= 37.0;
+            sys.pos_z[i] += 5.0;
+        }
+        let (sx, sy, sz) = sys.total_torque();
+        assert!(
+            (sx - tx).abs() < 1e-8 && (sy - ty).abs() < 1e-8 && (sz - tz).abs() < 1e-8,
+            "seed {seed}: torque depends on origin choice"
+        );
+    }
+}
+
+#[test]
+fn angle_force_is_perpendicular_to_its_own_arm() {
+    let mut rng = Lcg::new(9);
+
+    for _ in 0..50 {
+        let mut sys = System::new(3);
+        for i in [0usize, 2] {
+            sys.pos_x[i] = (rng.next_unit() - 0.5) * 8.0;
+            sys.pos_y[i] = (rng.next_unit() - 0.5) * 8.0;
+            sys.pos_z[i] = (rng.next_unit() - 0.5) * 8.0;
+        }
+
+        let theta = sys.angle(0, 1, 2);
+        if theta.sin() < MIN_TRIPLE_SIN {
+            continue;
+        }
+
+        let theta0 = theta - 0.15;
+        if theta0 <= 0.0 {
+            continue;
+        }
+        let mut angles = Angles::new();
+        angles.push(0, 1, 2, theta0);
+
+        sys.clear_forces();
+        angle::accumulate(&mut sys, &angles, ANGLE_K);
+
+        let arms = [(0usize, 1usize), (2usize, 1usize)];
+        for (end, vertex) in arms {
+            let ax = sys.pos_x[end] - sys.pos_x[vertex];
+            let ay = sys.pos_y[end] - sys.pos_y[vertex];
+            let az = sys.pos_z[end] - sys.pos_z[vertex];
+            let ra = (ax * ax + ay * ay + az * az).sqrt();
+
+            let dot = sys.frc_x[end] * ax + sys.frc_y[end] * ay + sys.frc_z[end] * az;
+            assert!(
+                dot.abs() < 1e-9,
+                "F.arm = {dot:.3e} for bead {end}: the projection term is missing"
+            );
+
+            let f = (sys.frc_x[end] * sys.frc_x[end]
+                + sys.frc_y[end] * sys.frc_y[end]
+                + sys.frc_z[end] * sys.frc_z[end])
+                .sqrt();
+            let expected = (2.0 * ANGLE_K * (theta - theta0)).abs() / ra;
+            assert!(
+                (f - expected).abs() < 1e-9 * expected.max(1.0),
+                "|F| = {f:.9} but |dV/dtheta|/r = {expected:.9}: the 1/sin factor is missing"
+            );
+        }
+    }
+}
+
+#[test]
+fn angle_force_matches_closed_form_at_60_degrees() {
+    let root3 = (3.0 as Real).sqrt();
+    let mut sys = System::new(3);
+    sys.pos_x[0] = 1.0;
+    sys.pos_x[2] = 0.5;
+    sys.pos_y[2] = root3 / 2.0;
+
+    let mut angles = Angles::new();
+    angles.push(0, 1, 2, PI / 3.0 - 0.1);
+
+    sys.clear_forces();
+    let e = angle::accumulate(&mut sys, &angles, 20.0);
+
+    assert!(
+        (e - 0.2).abs() < 1e-12,
+        "V = {e:.15}, expected K * 0.1^2 = 0.2"
+    );
+
+    let expected: [[Real; 3]; 3] = [
+        [0.0, 4.0, 0.0],
+        [-2.0 * root3, -2.0, 0.0],
+        [2.0 * root3, -2.0, 0.0],
+    ];
+    for (i, want) in expected.iter().enumerate() {
+        let got = [sys.frc_x[i], sys.frc_y[i], sys.frc_z[i]];
+        for dim in 0..3 {
+            assert!(
+                (got[dim] - want[dim]).abs() < 1e-12,
+                "bead {i} dim {dim}: got {:.15}, expected {:.15}",
+                got[dim],
+                want[dim]
+            );
+        }
+    }
+}
+
+#[test]
+fn angle_force_matches_closed_form_at_90_degrees() {
+    let ra = 2.0;
+    let rb = 3.0;
+    let mut sys = System::new(3);
+    sys.pos_x[0] = ra;
+    sys.pos_y[2] = rb;
+
+    let mut angles = Angles::new();
+    angles.push(0, 1, 2, PI / 2.0 - 0.1);
+
+    sys.clear_forces();
+    angle::accumulate(&mut sys, &angles, 20.0);
+
+    let dv = 2.0 * 20.0 * 0.1;
+    assert!((sys.frc_y[0] - dv / ra).abs() < 1e-12 && sys.frc_x[0].abs() < 1e-12);
+    assert!((sys.frc_x[2] - dv / rb).abs() < 1e-12 && sys.frc_y[2].abs() < 1e-12);
+}
+
+#[test]
+fn angle_is_skipped_at_a_linear_geometry() {
+    let mut sys = System::new(3);
+    sys.pos_x[0] = -3.0;
+    sys.pos_x[2] = 4.0;
+
+    let mut angles = Angles::new();
+    angles.push(0, 1, 2, PI / 2.0);
+
+    sys.clear_forces();
+    let e = angle::accumulate(&mut sys, &angles, ANGLE_K);
+
+    assert_eq!(e, 0.0, "a collinear triple must be skipped, not evaluated");
+    for i in 0..3 {
+        assert!(
+            sys.frc_x[i].is_finite() && sys.frc_y[i].is_finite() && sys.frc_z[i].is_finite(),
+            "bead {i} force is not finite at a linear geometry"
+        );
+        assert_eq!(sys.frc_x[i], 0.0);
+        assert_eq!(sys.frc_y[i], 0.0);
+        assert_eq!(sys.frc_z[i], 0.0);
+    }
+}
+
+#[test]
+fn chain5_conserves_angular_momentum() {
+    let r = chain5_1m();
+    assert!(
+        r.summary.max_angular_momentum_drift < 1e-9,
+        "max |L - L0| = {:.3e}, expected < 1e-9; velocity Verlet conserves L exactly when \
+         the total torque vanishes, so any growth means a force term produces net torque",
+        r.summary.max_angular_momentum_drift
+    );
 }
 
 #[test]

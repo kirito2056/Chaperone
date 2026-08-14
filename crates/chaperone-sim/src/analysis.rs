@@ -82,6 +82,7 @@ impl PeriodTracker {
 pub struct EnergySummary {
     pub e_initial: Real,
     pub drift_scale: Real,
+    pub max_angular_momentum_drift: Real,
     pub max_abs_drift: Real,
     pub head_mean: Real,
     pub tail_mean: Real,
@@ -103,6 +104,8 @@ impl EnergySummary {
 pub struct EnergyMonitor {
     e_initial: Real,
     drift_scale: Real,
+    l_initial: (Real, Real, Real),
+    max_l_drift: Real,
     steps: usize,
     window: usize,
     head_sum: Real,
@@ -116,10 +119,12 @@ pub struct EnergyMonitor {
 }
 
 impl EnergyMonitor {
-    pub fn new(e_initial: Real, steps: usize) -> Self {
+    pub fn new(sys: &System, e_initial: Real, steps: usize) -> Self {
         EnergyMonitor {
             e_initial,
             drift_scale: e_initial.abs().max(1.0),
+            l_initial: sys.angular_momentum(),
+            max_l_drift: 0.0,
             steps,
             window: (steps / 10).max(1),
             head_sum: 0.0,
@@ -144,6 +149,15 @@ impl EnergyMonitor {
                 self.first_nonfinite = Some(step);
             }
             return drift;
+        }
+
+        let (lx, ly, lz) = sys.angular_momentum();
+        let dlx = lx - self.l_initial.0;
+        let dly = ly - self.l_initial.1;
+        let dlz = lz - self.l_initial.2;
+        let l_drift = (dlx * dlx + dly * dly + dlz * dlz).sqrt();
+        if l_drift.is_finite() && l_drift > self.max_l_drift {
+            self.max_l_drift = l_drift;
         }
 
         if force > self.max_force {
@@ -171,6 +185,7 @@ impl EnergyMonitor {
         EnergySummary {
             e_initial: self.e_initial,
             drift_scale: self.drift_scale,
+            max_angular_momentum_drift: self.max_l_drift,
             max_abs_drift: self.max_abs_drift,
             head_mean: mean(self.head_sum, self.head_count),
             tail_mean: mean(self.tail_sum, self.tail_count),

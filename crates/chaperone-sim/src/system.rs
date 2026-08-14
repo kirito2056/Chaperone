@@ -57,6 +57,45 @@ impl System {
         (dx * dx + dy * dy + dz * dz).sqrt()
     }
 
+    pub fn angle(&self, i: usize, j: usize, k: usize) -> Real {
+        let ax = self.pos_x[i] - self.pos_x[j];
+        let ay = self.pos_y[i] - self.pos_y[j];
+        let az = self.pos_z[i] - self.pos_z[j];
+        let bx = self.pos_x[k] - self.pos_x[j];
+        let by = self.pos_y[k] - self.pos_y[j];
+        let bz = self.pos_z[k] - self.pos_z[j];
+
+        let ra = (ax * ax + ay * ay + az * az).sqrt();
+        let rb = (bx * bx + by * by + bz * bz).sqrt();
+        let cos = ((ax * bx + ay * by + az * bz) / (ra * rb)).clamp(-1.0, 1.0);
+        cos.acos()
+    }
+
+    pub fn angular_momentum(&self) -> (Real, Real, Real) {
+        let mut lx = 0.0;
+        let mut ly = 0.0;
+        let mut lz = 0.0;
+        for i in 0..self.n {
+            let m = self.mass[i];
+            lx += m * (self.pos_y[i] * self.vel_z[i] - self.pos_z[i] * self.vel_y[i]);
+            ly += m * (self.pos_z[i] * self.vel_x[i] - self.pos_x[i] * self.vel_z[i]);
+            lz += m * (self.pos_x[i] * self.vel_y[i] - self.pos_y[i] * self.vel_x[i]);
+        }
+        (lx, ly, lz)
+    }
+
+    pub fn total_torque(&self) -> (Real, Real, Real) {
+        let mut tx = 0.0;
+        let mut ty = 0.0;
+        let mut tz = 0.0;
+        for i in 0..self.n {
+            tx += self.pos_y[i] * self.frc_z[i] - self.pos_z[i] * self.frc_y[i];
+            ty += self.pos_z[i] * self.frc_x[i] - self.pos_x[i] * self.frc_z[i];
+            tz += self.pos_x[i] * self.frc_y[i] - self.pos_y[i] * self.frc_x[i];
+        }
+        (tx, ty, tz)
+    }
+
     pub fn total_force(&self) -> (Real, Real, Real) {
         (
             self.frc_x.iter().sum(),

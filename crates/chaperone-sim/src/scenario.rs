@@ -1,9 +1,11 @@
+use crate::forcefield::angle::Angles;
 use crate::forcefield::native::NativeContacts;
 use crate::forcefield::pairlist::PairList;
 use crate::forcefield::ForceField;
 use crate::system::{Real, System};
 
 pub const BOND_K: Real = 100.0;
+pub const ANGLE_K: Real = 20.0;
 pub const R0: Real = 3.8;
 pub const EPS: Real = 1.0;
 pub const SIGMA: Real = 4.0;
@@ -14,7 +16,7 @@ pub fn spring(initial_separation: Real) -> (System, ForceField) {
     let mut sys = System::new(2);
     sys.pos_x[1] = initial_separation;
 
-    let mut ff = ForceField::new(BOND_K, EPS, SIGMA);
+    let mut ff = ForceField::new(BOND_K, ANGLE_K, EPS, SIGMA);
     ff.bonds.push(0, 1, R0);
 
     (sys, ff)
@@ -38,7 +40,7 @@ pub fn chain4_with_gap(gap: Real) -> (System, ForceField) {
         sys.pos_y[i] = *y;
     }
 
-    let mut ff = ForceField::new(BOND_K, EPS, SIGMA);
+    let mut ff = ForceField::new(BOND_K, ANGLE_K, EPS, SIGMA);
     for i in 0..3 {
         ff.bonds.push(i as u32, (i + 1) as u32, R0);
     }
@@ -51,7 +53,7 @@ pub fn native_pair(sigma: Real, initial_separation: Real) -> (System, ForceField
     let mut sys = System::new(2);
     sys.pos_x[1] = initial_separation;
 
-    let mut ff = ForceField::new(BOND_K, EPS, SIGMA);
+    let mut ff = ForceField::new(BOND_K, ANGLE_K, EPS, SIGMA);
     ff.native.push(0, 1, sigma);
 
     (sys, ff)
@@ -77,11 +79,12 @@ pub fn chain5() -> (System, ForceField) {
         sys.pos_z[i] = *z;
     }
 
-    let mut ff = ForceField::new(BOND_K, EPS, SIGMA);
+    let mut ff = ForceField::new(BOND_K, ANGLE_K, EPS, SIGMA);
     for i in 0..4 {
         ff.bonds.push(i as u32, (i + 1) as u32, R0);
     }
 
+    ff.angles = Angles::from_chain(&sys);
     ff.native = NativeContacts::from_structure(&sys, CONTACT_CUTOFF, MIN_SEQUENCE_SEPARATION);
     ff.repulsion_pairs =
         PairList::all_pairs(5, MIN_SEQUENCE_SEPARATION).exclude(&ff.native.i, &ff.native.j);
