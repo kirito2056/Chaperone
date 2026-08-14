@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 chaperone-sim = { path = "../chaperone-sim" }
+chaperone-pdb = { path = "../chaperone-pdb" }

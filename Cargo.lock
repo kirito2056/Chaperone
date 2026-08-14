@@ -6,9 +6,17 @@ version = 4
 name = "chaperone-cli"
 version = "0.1.0"
 dependencies = [
+ "chaperone-pdb",
  "chaperone-sim",
 ]
 
 [[package]]
+name = "chaperone-pdb"
+version = "0.1.0"
+
+[[package]]
 name = "chaperone-sim"
 version = "0.1.0"
+dependencies = [
+ "chaperone-pdb",
+]

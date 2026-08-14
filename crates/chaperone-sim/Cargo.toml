@@ -2,3 +2,6 @@
 name = "chaperone-sim"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+chaperone-pdb = { path = "../chaperone-pdb" }

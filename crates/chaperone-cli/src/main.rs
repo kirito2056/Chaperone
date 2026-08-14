@@ -2,6 +2,7 @@ use chaperone_sim::analysis::{
     fraction_of_native_contacts, EnergyMonitor, EnergySummary, PeriodTracker, CONTACT_TOLERANCE,
 };
 use chaperone_sim::integrator;
+use chaperone_sim::model;
 use chaperone_sim::scenario::{self, BOND_K, R0, SIGMA};
 use chaperone_sim::system::{Real, PI};
 
@@ -234,15 +235,154 @@ fn run_chain5() {
     eprintln!("Q min                {q_min:.4}");
 }
 
+fn run_pdb(path: &str) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let structure = match chaperone_pdb::parse(&text, None) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let n = structure.len();
+    let bonds = structure.peptide_bond_lengths();
+    let bond_min = bonds.iter().cloned().fold(Real::INFINITY, Real::min);
+    let bond_max = bonds.iter().cloned().fold(Real::NEG_INFINITY, Real::max);
+
+    let heavy =
+        structure.heavy_atom_contacts(model::CONTACT_CUTOFF, model::MIN_SEQUENCE_SEPARATION);
+    let ca = structure.ca_contacts(7.5, model::MIN_SEQUENCE_SEPARATION);
+    let plaxco = structure.heavy_atom_contacts(model::PLAXCO_CUTOFF, 1);
+
+    let heavy_set: std::collections::HashSet<_> = heavy.iter().copied().collect();
+    let ca_set: std::collections::HashSet<_> = ca.iter().copied().collect();
+    let shared = heavy_set.intersection(&ca_set).count();
+
+    let (sys, ff) = model::go_model(
+        &structure,
+        scenario::BOND_K,
+        scenario::ANGLE_K,
+        scenario::K_PHI1,
+        scenario::K_PHI3,
+        scenario::EPS,
+        scenario::SIGMA,
+    );
+
+    let sigma_min = ff
+        .native
+        .sigma
+        .iter()
+        .cloned()
+        .fold(Real::INFINITY, Real::min);
+    let sigma_max = ff
+        .native
+        .sigma
+        .iter()
+        .cloned()
+        .fold(Real::NEG_INFINITY, Real::max);
+    let sigma_mean = ff.native.sigma.iter().sum::<Real>() / ff.native.len() as Real;
+
+    println!("chain                {}", structure.chain as char);
+    println!("residues             {n}");
+    println!(
+        "first / last         {} / {}",
+        structure.residues[0].seq,
+        structure.residues[n - 1].seq
+    );
+    println!("peptide CA-CA        [{bond_min:.3}, {bond_max:.3}]");
+    println!("radius of gyration   {:.3}", structure.radius_of_gyration());
+    println!();
+    println!("contacts heavy 4.5   {}   (sep >= 3)", heavy.len());
+    println!("contacts CA 7.5      {}   (sep >= 3)", ca.len());
+    println!(
+        "  shared / heavy-only / CA-only   {} / {} / {}",
+        shared,
+        heavy.len() - shared,
+        ca.len() - shared
+    );
+    println!();
+    println!(
+        "model CO             {:.4}   (heavy 4.5, sep >= 3)",
+        chaperone_pdb::relative_contact_order(&heavy, n).unwrap_or(Real::NAN)
+    );
+    println!(
+        "Plaxco CO            {:.4}   (heavy 6.0, sep >= 1)",
+        chaperone_pdb::relative_contact_order(&plaxco, n).unwrap_or(Real::NAN)
+    );
+    println!();
+    println!("sigma range          [{sigma_min:.3}, {sigma_max:.3}]   mean {sigma_mean:.3}");
+    println!(
+        "bonds / angles       {} / {}",
+        ff.bonds.len(),
+        ff.angles.len()
+    );
+    println!("dihedrals            {}", ff.dihedrals.len());
+    println!(
+        "native / non-native  {} / {}",
+        ff.native.len(),
+        ff.repulsion_pairs.len()
+    );
+
+    let mut probe = sys;
+    let mut worst: Real = 0.0;
+    for (name, force) in [
+        ("bond", 0usize),
+        ("angle", 1),
+        ("dihedral", 2),
+        ("native", 3),
+    ] {
+        probe.clear_forces();
+        match force {
+            0 => {
+                chaperone_sim::forcefield::bond::accumulate(&mut probe, &ff.bonds, ff.bond_k);
+            }
+            1 => {
+                chaperone_sim::forcefield::angle::accumulate(&mut probe, &ff.angles, ff.angle_k);
+            }
+            2 => {
+                chaperone_sim::forcefield::dihedral::accumulate(
+                    &mut probe,
+                    &ff.dihedrals,
+                    ff.k_phi1,
+                    ff.k_phi3,
+                );
+            }
+            _ => {
+                chaperone_sim::forcefield::native::accumulate(&mut probe, &ff.native, ff.eps);
+            }
+        }
+        let f = probe.max_force();
+        worst = worst.max(f);
+        println!("native-state |F| {name:<9} {f:.3e}");
+    }
+    println!("worst bonded |F|     {worst:.3e}   (limit 1e-6)");
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         None | Some("spring") => run_spring(),
         Some("chain4") => run_chain4(R0),
         Some("chain4-open") => run_chain4(4.5),
         Some("chain5") => run_chain5(),
+        Some("pdb") => match std::env::args().nth(2) {
+            Some(path) => run_pdb(&path),
+            None => {
+                eprintln!("usage: chaperone pdb <file.pdb>");
+                std::process::exit(1);
+            }
+        },
         Some(other) => {
             eprintln!("unknown scenario: {other}");
             eprintln!("usage: chaperone [spring|chain4|chain4-open|chain5] [steps]");
+            eprintln!("       chaperone pdb <file.pdb>");
             std::process::exit(1);
         }
     }
