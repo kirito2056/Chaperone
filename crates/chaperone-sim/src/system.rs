@@ -137,6 +137,33 @@ impl System {
         )
     }
 
+    pub fn radius_of_gyration(&self) -> Real {
+        if self.n == 0 {
+            return 0.0;
+        }
+        let n = self.n as Real;
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        let mut cz = 0.0;
+        for i in 0..self.n {
+            cx += self.pos_x[i];
+            cy += self.pos_y[i];
+            cz += self.pos_z[i];
+        }
+        cx /= n;
+        cy /= n;
+        cz /= n;
+
+        let mut sum = 0.0;
+        for i in 0..self.n {
+            let dx = self.pos_x[i] - cx;
+            let dy = self.pos_y[i] - cy;
+            let dz = self.pos_z[i] - cz;
+            sum += dx * dx + dy * dy + dz * dz;
+        }
+        (sum / n).sqrt()
+    }
+
     pub fn max_force(&self) -> Real {
         let mut m: Real = 0.0;
         for i in 0..self.n {

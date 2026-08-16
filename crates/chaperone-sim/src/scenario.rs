@@ -95,3 +95,21 @@ pub fn chain5() -> (System, ForceField) {
 
     (sys, ff)
 }
+
+pub fn extended_chain(n: usize, theta: Real) -> System {
+    assert!(n >= 3, "an extended chain needs at least three beads");
+    assert!(
+        theta > 0.0 && theta <= crate::system::PI,
+        "theta = {theta} is outside (0, PI]"
+    );
+
+    let a = R0 * (0.5 * theta).sin();
+    let b = R0 * (0.5 * theta).cos();
+
+    let mut sys = System::new(n);
+    for i in 0..n {
+        sys.pos_x[i] = a * i as Real;
+        sys.pos_y[i] = if i % 2 == 0 { 0.0 } else { b };
+    }
+    sys
+}

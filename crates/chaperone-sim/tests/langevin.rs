@@ -505,13 +505,3 @@ fn noise_is_independent_across_particles() {
         T_TEST / M_TEST
     );
 }
-
-// ---------------------------------------------------------------------------
-// I. collapse
-// ---------------------------------------------------------------------------
-
-#[test]
-#[ignore]
-fn ubiquitin_collapses_from_an_extended_chain() {
-    todo!("PDB 로딩 · Q/Rg 궤적 — collapse 커밋에서")
-}

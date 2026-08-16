@@ -1,10 +1,12 @@
 use chaperone_sim::analysis::{
     fraction_of_native_contacts, EnergyMonitor, EnergySummary, PeriodTracker, CONTACT_TOLERANCE,
 };
+use chaperone_sim::folding::{self, Equipartition, Stage};
 use chaperone_sim::integrator;
 use chaperone_sim::model;
 use chaperone_sim::scenario::{self, BOND_K, R0, SIGMA};
 use chaperone_sim::system::{Real, PI};
+use chaperone_sim::thermostat;
 
 const DT: Real = 1e-3;
 const DEFAULT_STEPS: usize = 1_000_000;
@@ -20,9 +22,9 @@ fn steps() -> usize {
         .unwrap_or(DEFAULT_STEPS)
 }
 
-fn report(summary: &EnergySummary, steps: usize, elapsed: std::time::Duration) {
+fn report(summary: &EnergySummary, steps: usize, dt: Real, elapsed: std::time::Duration) {
     eprintln!("steps                {steps}");
-    eprintln!("dt                   {DT:.1e}");
+    eprintln!("dt                   {dt:.1e}");
     eprintln!("wall time            {:.3} s", elapsed.as_secs_f64());
     eprintln!(
         "throughput           {:.2e} steps/s",
@@ -99,7 +101,7 @@ fn run_spring() {
     }
 
     let elapsed = start.elapsed();
-    report(&monitor.summary(), steps, elapsed);
+    report(&monitor.summary(), steps, DT, elapsed);
 
     let reduced_mass = 0.5;
     let omega = (2.0 * BOND_K / reduced_mass).sqrt();
@@ -165,7 +167,7 @@ fn run_chain4(gap: Real) {
     }
 
     let elapsed = start.elapsed();
-    report(&monitor.summary(), steps, elapsed);
+    report(&monitor.summary(), steps, DT, elapsed);
 
     eprintln!();
     eprintln!("pairs                {}", ff.repulsion_pairs.len());
@@ -221,7 +223,7 @@ fn run_chain5() {
     }
 
     let elapsed = start.elapsed();
-    report(&monitor.summary(), steps, elapsed);
+    report(&monitor.summary(), steps, DT, elapsed);
 
     eprintln!();
     eprintln!("dihedrals            {}", ff.dihedrals.len());
@@ -366,12 +368,218 @@ fn run_pdb(path: &str) {
     println!("worst bonded |F|     {worst:.3e}   (limit 1e-6)");
 }
 
+const PDB_PATH: &str = "data/pdb/1UBQ.pdb";
+const FOLD_DT: Real = 0.005;
+const FOLD_GAMMA: Real = 0.2;
+
+fn load_ubiquitin() -> chaperone_pdb::Structure {
+    let text = std::fs::read_to_string(PDB_PATH).unwrap_or_else(|e| {
+        eprintln!("cannot read {PDB_PATH}: {e}");
+        eprintln!("fetch it with: curl -o {PDB_PATH} https://files.rcsb.org/download/1UBQ.pdb");
+        std::process::exit(1);
+    });
+    chaperone_pdb::parse(&text, None).unwrap_or_else(|e| {
+        eprintln!("{PDB_PATH}: {e}");
+        std::process::exit(1);
+    })
+}
+
+fn ubiquitin_model() -> (chaperone_sim::System, chaperone_sim::ForceField) {
+    model::go_model(
+        &load_ubiquitin(),
+        scenario::BOND_K,
+        scenario::ANGLE_K,
+        scenario::K_PHI1,
+        scenario::K_PHI3,
+        scenario::EPS,
+        scenario::SIGMA,
+    )
+}
+
+fn run_nve() {
+    let steps = steps();
+    let (mut sys, ff) = ubiquitin_model();
+
+    thermostat::sample_initial_velocities(&mut sys, 0.05, 20260816);
+
+    let energies = integrator::initialize(&mut sys, &ff);
+    let e_initial = energies.total();
+    let mut monitor = EnergyMonitor::new(&sys, e_initial, steps);
+
+    let start = std::time::Instant::now();
+    for step in 0..steps {
+        let energies = integrator::step(&mut sys, &ff, FOLD_DT);
+        monitor.update(step, &sys, energies.total());
+    }
+    let elapsed = start.elapsed();
+
+    println!("beads                {}", sys.n);
+    report(&monitor.summary(), steps, FOLD_DT, elapsed);
+}
+
+fn run_fold() {
+    let steps = steps();
+    let (mut sys, ff) = ubiquitin_model();
+    let contacts = &ff.native;
+
+    let hold_steps = steps / 10;
+    let melt_steps = steps;
+    let refold_steps = steps * 2;
+
+    println!("stage,step,time,q,q_local,q_tertiary,rg,t_inst,e_pot,e_kin,e_total");
+    let emit = |s: &folding::Sample| {
+        println!(
+            "{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.6}",
+            s.stage.name,
+            s.step,
+            s.step as Real * FOLD_DT,
+            s.q,
+            s.q_local,
+            s.q_tertiary,
+            s.rg,
+            s.temperature,
+            s.energies.potential(),
+            s.energies.kinetic,
+            s.energies.total()
+        );
+    };
+
+    let native_q = chaperone_sim::analysis::fraction_of_native_contacts(
+        &sys,
+        contacts,
+        chaperone_sim::analysis::CONTACT_TOLERANCE,
+    )
+    .unwrap();
+    let native_qt = chaperone_sim::analysis::fraction_of_tertiary_contacts(
+        &sys,
+        contacts,
+        chaperone_sim::analysis::CONTACT_TOLERANCE,
+    )
+    .unwrap();
+    let native_ql = chaperone_sim::analysis::fraction_of_local_contacts(
+        &sys,
+        contacts,
+        chaperone_sim::analysis::CONTACT_TOLERANCE,
+    )
+    .unwrap();
+    eprintln!(
+        "native  Q {native_q:.4}  Q_local {native_ql:.4}  Q_tertiary {native_qt:.4}  Rg {:.3}",
+        sys.radius_of_gyration()
+    );
+    eprintln!();
+
+    let total_start = std::time::Instant::now();
+    let mut total_steps = 0usize;
+
+    for (index, temperature) in [0.1, 0.3, 0.5].iter().enumerate() {
+        let mut hot = sys_clone(&sys);
+        thermostat::sample_initial_velocities(&mut hot, *temperature, 1000 + index as u64);
+
+        let stage = Stage {
+            name: "hold",
+            temperature: *temperature,
+            gamma: FOLD_GAMMA,
+            steps: hold_steps,
+            seed: 100 + index as u64,
+        };
+        let mut equi = Equipartition::new();
+        let summary = folding::run_stage(&mut hot, &ff, contacts, &stage, FOLD_DT, 100, |s| {
+            emit(s);
+            equi.update(s.sys, &ff);
+        });
+        total_steps += hold_steps;
+
+        eprintln!(
+            "hold T={temperature:.1}  Q {:.4} -> {:.4}  Rg {:.3} -> {:.3}  <T> {:.4}",
+            summary.q_initial,
+            summary.q_final,
+            summary.rg_initial,
+            summary.rg_final,
+            summary.temperature_mean
+        );
+        eprintln!(
+            "  <(r-r0)^2> {:.3e}  expected {:.3e}   ratio {:.3}",
+            equi.bond_mean_square(),
+            Equipartition::expected_bond_mean_square(*temperature, scenario::BOND_K),
+            equi.bond_mean_square()
+                / Equipartition::expected_bond_mean_square(*temperature, scenario::BOND_K)
+        );
+        eprintln!(
+            "  <(th-th0)^2> {:.3e}  expected {:.3e}   ratio {:.3}",
+            equi.angle_mean_square(),
+            Equipartition::expected_angle_mean_square(*temperature, scenario::ANGLE_K),
+            equi.angle_mean_square()
+                / Equipartition::expected_angle_mean_square(*temperature, scenario::ANGLE_K)
+        );
+    }
+    eprintln!();
+
+    thermostat::sample_initial_velocities(&mut sys, 1.8, 2001);
+    let melt = Stage {
+        name: "melt",
+        temperature: 1.8,
+        gamma: FOLD_GAMMA,
+        steps: melt_steps,
+        seed: 201,
+    };
+    let melted = folding::run_stage(&mut sys, &ff, contacts, &melt, FOLD_DT, 100, emit);
+    total_steps += melt_steps;
+    eprintln!(
+        "melt  Q {:.4} -> {:.4}  Q_local {:.4}  Q_tert {:.4}  Rg {:.3} -> {:.3} (max {:.3})  <T> {:.4}",
+        melted.q_initial, melted.q_final, melted.q_local_final, melted.q_tertiary_final,
+        melted.rg_initial, melted.rg_final, melted.rg_max, melted.temperature_mean
+    );
+
+    let refold = Stage {
+        name: "refold",
+        temperature: 0.6,
+        gamma: FOLD_GAMMA,
+        steps: refold_steps,
+        seed: 301,
+    };
+    let refolded = folding::run_stage(&mut sys, &ff, contacts, &refold, FOLD_DT, 100, emit);
+    total_steps += refold_steps;
+    eprintln!(
+        "refold Q {:.4} -> {:.4}  Q_local {:.4}  Q_tert {:.4} (from {:.4})  Rg {:.3} -> {:.3}  <T> {:.4}",
+        refolded.q_initial, refolded.q_final, refolded.q_local_final, refolded.q_tertiary_final,
+        melted.q_tertiary_final, refolded.rg_initial, refolded.rg_final, refolded.temperature_mean
+    );
+
+    let elapsed = total_start.elapsed();
+    eprintln!();
+    eprintln!("total steps          {total_steps}");
+    eprintln!("wall time            {:.3} s", elapsed.as_secs_f64());
+    eprintln!(
+        "throughput           {:.2e} steps/s",
+        total_steps as Real / elapsed.as_secs_f64()
+    );
+    eprintln!(
+        "finite               {}",
+        if refolded.is_finite() {
+            "ok"
+        } else {
+            "BLEW UP"
+        }
+    );
+}
+
+fn sys_clone(src: &chaperone_sim::System) -> chaperone_sim::System {
+    let mut out = chaperone_sim::System::new(src.n);
+    out.pos_x.copy_from_slice(&src.pos_x);
+    out.pos_y.copy_from_slice(&src.pos_y);
+    out.pos_z.copy_from_slice(&src.pos_z);
+    out.mass.copy_from_slice(&src.mass);
+    out
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         None | Some("spring") => run_spring(),
         Some("chain4") => run_chain4(R0),
         Some("chain4-open") => run_chain4(4.5),
         Some("chain5") => run_chain5(),
+        Some("nve") => run_nve(),
+        Some("fold") => run_fold(),
         Some("pdb") => match std::env::args().nth(2) {
             Some(path) => run_pdb(&path),
             None => {
@@ -382,6 +590,7 @@ fn main() {
         Some(other) => {
             eprintln!("unknown scenario: {other}");
             eprintln!("usage: chaperone [spring|chain4|chain4-open|chain5] [steps]");
+            eprintln!("       chaperone [nve|fold] [steps]");
             eprintln!("       chaperone pdb <file.pdb>");
             std::process::exit(1);
         }

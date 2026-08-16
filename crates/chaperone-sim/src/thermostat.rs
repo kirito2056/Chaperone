@@ -63,6 +63,20 @@ impl Langevin {
     }
 }
 
+pub const INITIAL_VELOCITY_STEP: u64 = 0;
+
+pub fn sample_initial_velocities(sys: &mut System, temperature: Real, seed: u64) {
+    assert!(temperature > 0.0, "temperature must be positive");
+    let noise = Noise::new(seed);
+    let step = INITIAL_VELOCITY_STEP;
+    for i in 0..sys.n {
+        let scale = (temperature / sys.mass[i]).sqrt();
+        sys.vel_x[i] = scale * noise.gaussian(step, i, 0);
+        sys.vel_y[i] = scale * noise.gaussian(step, i, 1);
+        sys.vel_z[i] = scale * noise.gaussian(step, i, 2);
+    }
+}
+
 pub fn instantaneous_temperature(sys: &System) -> Real {
     2.0 * sys.kinetic_energy() / (3.0 * sys.n as Real)
 }

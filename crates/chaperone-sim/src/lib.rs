@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod folding;
 pub mod forcefield;
 pub mod integrator;
 pub mod model;

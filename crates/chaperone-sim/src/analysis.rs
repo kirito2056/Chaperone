@@ -3,19 +3,24 @@ use crate::system::{Real, System};
 
 pub const CONTACT_TOLERANCE: Real = 1.2;
 
-pub fn fraction_of_native_contacts(
+pub const TERTIARY_SEPARATION: usize = 12;
+
+fn q_over(
     sys: &System,
     contacts: &NativeContacts,
     tol: Real,
+    keep: impl Fn(usize) -> bool,
 ) -> Option<Real> {
-    if contacts.is_empty() {
-        return None;
-    }
-
     let mut formed = 0usize;
+    let mut total = 0usize;
+
     for c in 0..contacts.len() {
         let i = contacts.i[c] as usize;
         let j = contacts.j[c] as usize;
+        if !keep(j - i) {
+            continue;
+        }
+        total += 1;
 
         let dx = sys.pos_x[j] - sys.pos_x[i];
         let dy = sys.pos_y[j] - sys.pos_y[i];
@@ -28,7 +33,34 @@ pub fn fraction_of_native_contacts(
         }
     }
 
-    Some(formed as Real / contacts.len() as Real)
+    if total == 0 {
+        return None;
+    }
+    Some(formed as Real / total as Real)
+}
+
+pub fn fraction_of_native_contacts(
+    sys: &System,
+    contacts: &NativeContacts,
+    tol: Real,
+) -> Option<Real> {
+    q_over(sys, contacts, tol, |_| true)
+}
+
+pub fn fraction_of_local_contacts(
+    sys: &System,
+    contacts: &NativeContacts,
+    tol: Real,
+) -> Option<Real> {
+    q_over(sys, contacts, tol, |sep| sep < TERTIARY_SEPARATION)
+}
+
+pub fn fraction_of_tertiary_contacts(
+    sys: &System,
+    contacts: &NativeContacts,
+    tol: Real,
+) -> Option<Real> {
+    q_over(sys, contacts, tol, |sep| sep >= TERTIARY_SEPARATION)
 }
 
 pub struct PeriodTracker {
