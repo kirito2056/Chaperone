@@ -39,9 +39,12 @@ impl Langevin {
         let step = self.step_count;
         for i in 0..sys.n {
             let scale = (self.temperature / sys.mass[i]).sqrt();
-            sys.vel_x[i] = self.c1 * sys.vel_x[i] + self.c2 * scale * self.noise.gaussian(step, i, 0);
-            sys.vel_y[i] = self.c1 * sys.vel_y[i] + self.c2 * scale * self.noise.gaussian(step, i, 1);
-            sys.vel_z[i] = self.c1 * sys.vel_z[i] + self.c2 * scale * self.noise.gaussian(step, i, 2);
+            sys.vel_x[i] =
+                self.c1 * sys.vel_x[i] + self.c2 * scale * self.noise.gaussian(step, i, 0);
+            sys.vel_y[i] =
+                self.c1 * sys.vel_y[i] + self.c2 * scale * self.noise.gaussian(step, i, 1);
+            sys.vel_z[i] =
+                self.c1 * sys.vel_z[i] + self.c2 * scale * self.noise.gaussian(step, i, 2);
         }
     }
 

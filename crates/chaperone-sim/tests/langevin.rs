@@ -1,9 +1,9 @@
 use chaperone_sim::analysis::EnergyMonitor;
 use chaperone_sim::forcefield::ForceField;
+use chaperone_sim::integrator;
 use chaperone_sim::scenario::{self, R0};
 use chaperone_sim::system::{Real, System};
 use chaperone_sim::thermostat::{center_of_mass_velocity, instantaneous_temperature, Langevin};
-use chaperone_sim::integrator;
 
 const T_TEST: Real = 0.8;
 const M_TEST: Real = 1.3;
@@ -456,7 +456,10 @@ fn different_seeds_diverge_but_agree_on_the_temperature() {
     let b = run(SEED + 1);
 
     let identical = (0..N).filter(|&i| a.vel_x[i] == b.vel_x[i]).count();
-    assert_eq!(identical, 0, "{identical} velocities are shared across seeds");
+    assert_eq!(
+        identical, 0,
+        "{identical} velocities are shared across seeds"
+    );
 
     let temperature = |s: &System| instantaneous_temperature(s);
     let (ta, tb) = (temperature(&a), temperature(&b));

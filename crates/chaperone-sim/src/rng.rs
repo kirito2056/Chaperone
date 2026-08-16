@@ -213,4 +213,3 @@ mod tests {
         assert_eq!(noise.gaussian(999, 12, 1).to_bits(), 0xC000_06A6_DFB4_2340);
     }
 }
-
