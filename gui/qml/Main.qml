@@ -69,6 +69,7 @@ Window {
             origin: pivot
             camera: sceneCamera
             panEnabled: true
+            mouseEnabled: sim.grabbedIndex < 0
         }
 
         DirectionalLight {
@@ -172,6 +173,7 @@ Window {
         id: grabArea
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton
+        preventStealing: true
         property real depth: 0
 
         function anchorFrom(px, py) {
@@ -192,10 +194,8 @@ Window {
                 // 깊이는 반드시 mapFrom3DScene 의 z 로. pickResult.distance 는
                 // 광선 길이라 mapTo3DScene 의 규약(근평면 거리)과 다르다.
                 depth = view.mapFrom3DScene(hit.scenePosition).z
-                if (sim.grab(hit.objectHit.beadIndex)) {
-                    orbit.enabled = false
+                if (sim.grab(hit.objectHit.beadIndex))
                     return
-                }
             }
             mouse.accepted = false
         }
@@ -209,12 +209,10 @@ Window {
 
         onReleased: {
             sim.release()
-            orbit.enabled = true
         }
 
         onCanceled: {
             sim.release()
-            orbit.enabled = true
         }
     }
 

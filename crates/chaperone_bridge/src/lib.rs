@@ -17,6 +17,7 @@ const GAMMA: Real = 0.2;
 const SEED: u64 = 20260818;
 const DEFAULT_TEMPERATURE: f32 = 0.5;
 const SPLINE_SUBDIVISIONS: usize = 3;
+const VIEW_TRACKING: f32 = 0.03;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -180,6 +181,7 @@ pub struct SimulationRust {
     native: Vec<[Real; 3]>,
     positions: Vec<[f32; 3]>,
     centre: [Real; 3],
+    view_settled: bool,
     anchor_local: [f32; 3],
     hold_local: [f32; 3],
     grab_origin: [f32; 3],
@@ -218,6 +220,7 @@ impl Default for SimulationRust {
             native: Vec::new(),
             positions: Vec::new(),
             centre: [0.0; 3],
+            view_settled: false,
             anchor_local: [0.0; 3],
             hold_local: [0.0; 3],
             grab_origin: [0.0; 3],
@@ -284,18 +287,31 @@ impl SimulationRust {
             };
         }
 
-        // 1단계: 무게중심과 표시 좌표. sys 만 읽는다.
+        let grabbed = self.ff.as_ref().is_some_and(|ff| ff.pull.is_active());
+
+        // 1단계: 표시 기준점과 표시 좌표. sys 만 읽는다.
         let (centre, radius) = {
             let sys = self.sys.as_ref().expect("checked above");
             let n = sys.n as Real;
-            let mut centre = [0.0 as Real; 3];
+            let mut com = [0.0 as Real; 3];
             for i in 0..sys.n {
-                centre[0] += sys.pos_x[i];
-                centre[1] += sys.pos_y[i];
-                centre[2] += sys.pos_z[i];
+                com[0] += sys.pos_x[i];
+                com[1] += sys.pos_y[i];
+                com[2] += sys.pos_z[i];
             }
-            for c in centre.iter_mut() {
+            for c in com.iter_mut() {
                 *c /= n;
+            }
+
+            let mut centre = [0.0 as Real; 3];
+            for d in 0..3 {
+                centre[d] = if grabbed {
+                    self.centre[d]
+                } else if self.view_settled {
+                    self.centre[d] * (1.0 - VIEW_TRACKING as Real) + com[d] * VIEW_TRACKING as Real
+                } else {
+                    com[d]
+                };
             }
 
             self.positions.clear();
@@ -336,11 +352,14 @@ impl SimulationRust {
 
         // 필드를 직접 쓰면 뒤따르는 set_view_radius 가 변화 없음으로 판단해
         // NOTIFY 를 생략한다. 읽기만 하고 쓰기는 setter 에 맡긴다.
-        let smoothed = if self.view_radius <= 1.0 {
-            radius
+        let smoothed = if grabbed {
+            self.view_radius
+        } else if self.view_settled {
+            self.view_radius * (1.0 - VIEW_TRACKING) + radius * VIEW_TRACKING
         } else {
-            self.view_radius * 0.97 + radius * 0.03
+            radius
         };
+        self.view_settled = true;
 
         // 3단계: 관측량.
         let sys = self.sys.as_ref().expect("checked above");
@@ -406,6 +425,7 @@ impl qobject::Simulation {
             rust.ff = Some(ff);
             rust.bath = Some(Langevin::new(GAMMA, temperature, DT, SEED));
             rust.native = native;
+            rust.view_settled = false;
         }
 
         let observables = self.as_mut().rust_mut().get_mut().refresh();
