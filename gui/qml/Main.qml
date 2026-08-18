@@ -12,7 +12,7 @@ Window {
     color: "#0e1013"
 
     readonly property real beadRadius: 1.6
-    readonly property real cameraDistance: Math.max(sim.boundingRadius, 1.0) * 3.4
+    readonly property real cameraDistance: Math.max(sim.boundingRadius, 1.0) * 2.3
 
     Simulation {
         id: sim

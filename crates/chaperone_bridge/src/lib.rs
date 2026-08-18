@@ -14,8 +14,8 @@ pub mod qobject {
     extern "RustQt" {
         #[qobject]
         #[qml_element]
-        #[qproperty(i32, atom_count)]
-        #[qproperty(f32, bounding_radius)]
+        #[qproperty(i32, atom_count, cxx_name = "atomCount")]
+        #[qproperty(f32, bounding_radius, cxx_name = "boundingRadius")]
         #[qproperty(QString, status)]
         type Simulation = super::SimulationRust;
 
