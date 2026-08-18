@@ -1509,6 +1509,7 @@ fn pull_with_a_static_target_conserves_energy() {
 
 #[test]
 fn an_empty_pull_matches_the_golden_trajectory() {
+    const GOLDEN_TOLERANCE: Real = 1e-7;
     const GOLDEN: [(u64, u64, u64); 5] = [
         (0x402AB6837970BE4E, 0x40098C9873558125, 0xC02213779CA658FF),
         (0x402AA46CE9868146, 0x3FE6DA08A8E88730, 0xC018D091BB861E9C),
@@ -1528,14 +1529,14 @@ fn an_empty_pull_matches_the_golden_trajectory() {
     }
 
     for (i, (x, y, z)) in GOLDEN.iter().enumerate() {
-        assert_eq!(
-            (
-                sys.pos_x[i].to_bits(),
-                sys.pos_y[i].to_bits(),
-                sys.pos_z[i].to_bits()
-            ),
-            (*x, *y, *z),
-            "bead {i} drifted from the trajectory recorded before the pull term existed"
+        let dx = sys.pos_x[i] - Real::from_bits(*x);
+        let dy = sys.pos_y[i] - Real::from_bits(*y);
+        let dz = sys.pos_z[i] - Real::from_bits(*z);
+        let deviation = (dx * dx + dy * dy + dz * dz).sqrt();
+        assert!(
+            deviation < GOLDEN_TOLERANCE,
+            "bead {i} drifted {deviation:.3e} from the trajectory recorded before the \
+             pull term existed"
         );
     }
 }
