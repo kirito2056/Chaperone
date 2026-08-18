@@ -8,10 +8,12 @@ use chaperone_sim::forcefield::bond::{self, Bonds};
 use chaperone_sim::forcefield::dihedral::{self, Dihedrals};
 use chaperone_sim::forcefield::native::{self, NativeContacts};
 use chaperone_sim::forcefield::pairlist::PairList;
+use chaperone_sim::forcefield::pull::{self, Pull, MAX_EXTENSION};
 use chaperone_sim::forcefield::repulsion;
+use chaperone_sim::forcefield::ForceField;
 use chaperone_sim::integrator;
 use chaperone_sim::scenario::{
-    self, ANGLE_K, BOND_K, EPS, K_PHI1, K_PHI3, MIN_SEQUENCE_SEPARATION, R0, SIGMA,
+    self, ANGLE_K, BOND_K, EPS, K_PHI1, K_PHI3, MIN_SEQUENCE_SEPARATION, PULL_K, R0, SIGMA,
 };
 use chaperone_sim::system::{Real, System, PI};
 
@@ -1292,4 +1294,247 @@ fn integrator_is_second_order() {
         (50.0..=200.0).contains(&ratio),
         "drift ratio {ratio:.1} (coarse {coarse:.3e}, fine {fine:.3e}), expected ~100"
     );
+}
+
+// ---------------------------------------------------------------------------
+// H. steered MD — the only external force in the model
+// ---------------------------------------------------------------------------
+
+fn pulled(index: u32, target: [Real; 3]) -> Pull {
+    Pull {
+        index: Some(index),
+        target,
+        k: PULL_K,
+    }
+}
+
+fn single_bead(at: [Real; 3]) -> System {
+    let mut sys = System::new(1);
+    sys.pos_x[0] = at[0];
+    sys.pos_y[0] = at[1];
+    sys.pos_z[0] = at[2];
+    sys
+}
+
+#[test]
+fn pull_matches_a_closed_form() {
+    // Inside the clamp: |d| = 3, V = k/2 * 9 = 90, F = k * d
+    let mut sys = single_bead([0.0, 0.0, 0.0]);
+    let p = pulled(0, [1.0, 2.0, 2.0]);
+    sys.clear_forces();
+    let e = pull::accumulate(&mut sys, &p);
+    assert!((e - 90.0).abs() < 1e-12, "V = {e:.12}, expected 90");
+    assert!((sys.frc_x[0] - 20.0).abs() < 1e-12);
+    assert!((sys.frc_y[0] - 40.0).abs() < 1e-12);
+    assert!((sys.frc_z[0] - 40.0).abs() < 1e-12);
+
+    // Exactly at the clamp: |d| = 5, V = 250, F = (60, 80, 0)
+    let mut sys = single_bead([1.0, 2.0, 2.0]);
+    let p = pulled(0, [4.0, 6.0, 2.0]);
+    sys.clear_forces();
+    let e = pull::accumulate(&mut sys, &p);
+    assert!((e - 250.0).abs() < 1e-12, "V = {e:.12}, expected 250");
+    assert!((sys.frc_x[0] - 60.0).abs() < 1e-12);
+    assert!((sys.frc_y[0] - 80.0).abs() < 1e-12);
+    assert!(sys.frc_z[0].abs() < 1e-12);
+
+    // Beyond the clamp: |d| = 10, V = 250 + k*5*5 = 750, |F| = k*5 = 100
+    let mut sys = single_bead([0.0, 0.0, 0.0]);
+    let p = pulled(0, [0.0, 0.0, 10.0]);
+    sys.clear_forces();
+    let e = pull::accumulate(&mut sys, &p);
+    assert!((e - 750.0).abs() < 1e-12, "V = {e:.12}, expected 750");
+    assert!((sys.frc_z[0] - 100.0).abs() < 1e-12);
+}
+
+#[test]
+fn pull_force_is_capped_beyond_the_clamp() {
+    let p = pulled(0, [0.0, 0.0, 0.0]);
+    for reach in [1.0, 4.9, MAX_EXTENSION, 20.0, 200.0] {
+        let sys = single_bead([0.0, 0.0, -reach]);
+        let f = p.force_magnitude(&sys);
+        let expected = PULL_K * reach.min(MAX_EXTENSION);
+        assert!(
+            (f - expected).abs() < 1e-9,
+            "reach {reach}: |F| = {f:.6}, expected {expected:.6}; without the clamp a \
+             20 A mouse flick injects k/2 * 400 = 4000 eps, about twenty times the \
+             whole folding well"
+        );
+    }
+}
+
+#[test]
+fn pull_force_matches_numerical_gradient() {
+    for (seed, offset) in [
+        (0u64, [1.7, -0.9, 0.4]),
+        (1, [-2.2, 1.1, 3.0]),
+        (2, [0.3, 0.2, -0.1]),
+        (3, [9.0, -7.0, 4.0]),
+    ] {
+        let (mut sys, _, _) = random_chain(seed, 5, 12.0, MIN_SEPARATION);
+        let target = [
+            sys.pos_x[2] + offset[0],
+            sys.pos_y[2] + offset[1],
+            sys.pos_z[2] + offset[2],
+        ];
+        let p = pulled(2, target);
+        assert_numerical_gradient(
+            &mut sys,
+            |s| pull::accumulate(s, &p),
+            |s| pull::energy(s, &p),
+            &format!("pull seed {seed}"),
+        );
+    }
+}
+
+#[test]
+fn pull_restores_toward_the_target() {
+    let mut rng = Lcg::new(808);
+    for _ in 0..40 {
+        let at = [
+            (rng.next_unit() - 0.5) * 20.0,
+            (rng.next_unit() - 0.5) * 20.0,
+            (rng.next_unit() - 0.5) * 20.0,
+        ];
+        let target = [
+            (rng.next_unit() - 0.5) * 20.0,
+            (rng.next_unit() - 0.5) * 20.0,
+            (rng.next_unit() - 0.5) * 20.0,
+        ];
+        let mut sys = single_bead(at);
+        let p = pulled(0, target);
+        sys.clear_forces();
+        pull::accumulate(&mut sys, &p);
+
+        let dot = sys.frc_x[0] * (target[0] - at[0])
+            + sys.frc_y[0] * (target[1] - at[1])
+            + sys.frc_z[0] * (target[2] - at[2]);
+        assert!(dot > 0.0, "F . (target - r) = {dot:.6e}, expected positive");
+    }
+}
+
+#[test]
+fn pull_equipartition_matches_three_t_over_k() {
+    const T: Real = 0.5;
+    const GAMMA: Real = 10.0;
+    const DT: Real = 0.005;
+    const STEPS: usize = 2_000_000;
+
+    let mut sys = single_bead([0.0, 0.0, 0.0]);
+    let mut ff = ForceField::new(BOND_K, ANGLE_K, K_PHI1, K_PHI3, EPS, SIGMA);
+    ff.pull = pulled(0, [0.0, 0.0, 0.0]);
+
+    let mut bath = chaperone_sim::thermostat::Langevin::new(GAMMA, T, DT, 555);
+    integrator::initialize(&mut sys, &ff);
+
+    let mut sum = 0.0;
+    for _ in 0..STEPS {
+        bath.step(&mut sys, &ff);
+        sum +=
+            sys.pos_x[0] * sys.pos_x[0] + sys.pos_y[0] * sys.pos_y[0] + sys.pos_z[0] * sys.pos_z[0];
+    }
+
+    let measured = sum / STEPS as Real;
+    let expected = 3.0 * T / PULL_K;
+    assert!(
+        (measured / expected - 1.0).abs() < 0.08,
+        "<|r - target|^2> = {measured:.6} against 3T/k = {expected:.6}; dropping the \
+         one half from V = k/2 d^2 reads exactly half here"
+    );
+}
+
+#[test]
+fn pulling_accounts_for_the_entire_net_force() {
+    let (mut sys, ff_base) = scenario::chain5();
+    let mut ff = ff_base;
+    let target = [sys.pos_x[1] + 2.0, sys.pos_y[1] - 1.5, sys.pos_z[1] + 0.8];
+    ff.pull = pulled(1, target);
+
+    sys.clear_forces();
+    ff.accumulate(&mut sys);
+
+    let (fx, fy, fz) = sys.total_force();
+    let expected = [
+        PULL_K * (target[0] - sys.pos_x[1]),
+        PULL_K * (target[1] - sys.pos_y[1]),
+        PULL_K * (target[2] - sys.pos_z[1]),
+    ];
+    for (got, want) in [(fx, expected[0]), (fy, expected[1]), (fz, expected[2])] {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "net force {got:.9} vs the pull alone {want:.9}; every other term must \
+             still cancel, and the pull must be the whole remainder"
+        );
+    }
+}
+
+#[test]
+fn pull_with_a_static_target_conserves_energy() {
+    const STEPS: usize = 100_000;
+    let (mut sys, ff_base) = scenario::chain5();
+    let mut ff = ff_base;
+    ff.pull = pulled(
+        0,
+        [sys.pos_x[0] + 1.5, sys.pos_y[0] + 1.0, sys.pos_z[0] - 0.7],
+    );
+
+    let energies = integrator::initialize(&mut sys, &ff);
+    assert!(
+        energies.pull > 0.0,
+        "the static target must actually stretch the spring"
+    );
+
+    let mut monitor = EnergyMonitor::new(&sys, energies.total(), STEPS);
+    for step in 0..STEPS {
+        let energies = integrator::step(&mut sys, &ff, 1e-3);
+        monitor.update(step, &sys, energies.total());
+    }
+
+    let s = monitor.summary();
+    assert!(s.is_finite(), "blew up at {:?}", s.first_nonfinite);
+    assert!(
+        s.max_abs_drift < 5e-4,
+        "max |drift| = {:.3e}; a static target makes V_pull time independent, so the \
+         total energy is conserved even though the net force and the angular momentum \
+         are not",
+        s.max_abs_drift
+    );
+    assert!(
+        s.secular_drift() < 3e-5,
+        "secular drift = {:.3e}",
+        s.secular_drift()
+    );
+}
+
+#[test]
+fn an_empty_pull_matches_the_golden_trajectory() {
+    const GOLDEN: [(u64, u64, u64); 5] = [
+        (0x402AB6837970BE4E, 0x40098C9873558125, 0xC02213779CA658FF),
+        (0x402AA46CE9868146, 0x3FE6DA08A8E88730, 0xC018D091BB861E9C),
+        (0x4030DDF2148C8828, 0x3FF84DC48BDD5630, 0xC01429E5D064A36E),
+        (0x4030F9571E31956A, 0x401072DE4D0F1DE7, 0xC01F0ECD57530092),
+        (0x402C1469954558C6, 0x4016FA6B56256D7E, 0xC0179B0867EEC1CE),
+    ];
+
+    let (mut sys, ff) = scenario::chain5();
+    assert!(!ff.pull.is_active(), "chain5 must not come pre-grabbed");
+
+    chaperone_sim::thermostat::sample_initial_velocities(&mut sys, 0.5, 90210);
+    integrator::initialize(&mut sys, &ff);
+    let mut bath = chaperone_sim::thermostat::Langevin::new(0.2, 0.5, 0.005, 31415);
+    for _ in 0..10_000 {
+        bath.step(&mut sys, &ff);
+    }
+
+    for (i, (x, y, z)) in GOLDEN.iter().enumerate() {
+        assert_eq!(
+            (
+                sys.pos_x[i].to_bits(),
+                sys.pos_y[i].to_bits(),
+                sys.pos_z[i].to_bits()
+            ),
+            (*x, *y, *z),
+            "bead {i} drifted from the trajectory recorded before the pull term existed"
+        );
+    }
 }

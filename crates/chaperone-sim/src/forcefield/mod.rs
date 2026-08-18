@@ -3,6 +3,7 @@ pub mod bond;
 pub mod dihedral;
 pub mod native;
 pub mod pairlist;
+pub mod pull;
 pub mod repulsion;
 
 use crate::system::{Real, System};
@@ -11,6 +12,7 @@ use bond::Bonds;
 use dihedral::Dihedrals;
 use native::NativeContacts;
 use pairlist::PairList;
+use pull::Pull;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Energies {
@@ -19,12 +21,13 @@ pub struct Energies {
     pub dihedral: Real,
     pub native: Real,
     pub repulsion: Real,
+    pub pull: Real,
     pub kinetic: Real,
 }
 
 impl Energies {
     pub fn potential(&self) -> Real {
-        self.bond + self.angle + self.dihedral + self.native + self.repulsion
+        self.bond + self.angle + self.dihedral + self.native + self.repulsion + self.pull
     }
 
     pub fn total(&self) -> Real {
@@ -44,6 +47,7 @@ pub struct ForceField {
     pub repulsion_pairs: PairList,
     pub eps: Real,
     pub sigma: Real,
+    pub pull: Pull,
 }
 
 impl ForceField {
@@ -67,6 +71,7 @@ impl ForceField {
             repulsion_pairs: PairList::new(),
             eps,
             sigma,
+            pull: Pull::new(crate::scenario::PULL_K),
         }
     }
 
@@ -76,6 +81,7 @@ impl ForceField {
         self.dihedrals.validate(n);
         self.native.validate(n);
         self.repulsion_pairs.validate(n);
+        self.pull.validate(n);
         assert!(
             self.sigma > 0.0,
             "sigma must be positive, got {}",
@@ -90,6 +96,7 @@ impl ForceField {
             dihedral: dihedral::accumulate(sys, &self.dihedrals, self.k_phi1, self.k_phi3),
             native: native::accumulate(sys, &self.native, self.eps),
             repulsion: repulsion::accumulate(sys, &self.repulsion_pairs, self.eps, self.sigma),
+            pull: pull::accumulate(sys, &self.pull),
             kinetic: 0.0,
         }
     }
@@ -100,5 +107,6 @@ impl ForceField {
             + dihedral::energy(sys, &self.dihedrals, self.k_phi1, self.k_phi3)
             + native::energy(sys, &self.native, self.eps)
             + repulsion::energy(sys, &self.repulsion_pairs, self.eps, self.sigma)
+            + pull::energy(sys, &self.pull)
     }
 }

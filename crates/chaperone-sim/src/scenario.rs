@@ -12,6 +12,7 @@ pub const K_PHI3: Real = 0.5;
 pub const R0: Real = 3.8;
 pub const EPS: Real = 1.0;
 pub const SIGMA: Real = 4.0;
+pub const PULL_K: Real = 20.0;
 pub const CONTACT_CUTOFF: Real = 4.0;
 pub const MIN_SEQUENCE_SEPARATION: usize = 3;
 
