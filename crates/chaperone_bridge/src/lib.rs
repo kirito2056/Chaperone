@@ -47,6 +47,11 @@ pub mod qobject {
         #[qproperty(f32, pull_force, cxx_name = "pullForce")]
         #[qproperty(f32, pull_extension, cxx_name = "pullExtension")]
         #[qproperty(i32, anchored_index, cxx_name = "anchoredIndex")]
+        #[qproperty(f32, pull_coordinate, cxx_name = "pullCoordinate")]
+        #[qproperty(i32, trace_length, cxx_name = "traceLength")]
+        #[qproperty(f32, trace_min_coordinate, cxx_name = "traceMinCoordinate")]
+        #[qproperty(f32, trace_max_coordinate, cxx_name = "traceMaxCoordinate")]
+        #[qproperty(f32, trace_max_force, cxx_name = "traceMaxForce")]
         type Simulation = super::SimulationRust;
 
         #[qinvokable]
@@ -98,6 +103,22 @@ pub mod qobject {
         fn toggle_anchor(self: Pin<&mut Simulation>, index: i32) -> bool;
 
         #[qinvokable]
+        #[cxx_name = "traceCoordinateAt"]
+        fn trace_coordinate_at(self: &Simulation, index: i32) -> f32;
+
+        #[qinvokable]
+        #[cxx_name = "traceForceAt"]
+        fn trace_force_at(self: &Simulation, index: i32) -> f32;
+
+        #[qinvokable]
+        #[cxx_name = "clearTrace"]
+        fn clear_trace(self: Pin<&mut Simulation>);
+
+        #[qinvokable]
+        #[cxx_name = "saveTrace"]
+        fn save_trace(self: Pin<&mut Simulation>, path: &QString) -> bool;
+
+        #[qinvokable]
         #[cxx_name = "pullMidpoint"]
         fn pull_midpoint(self: &Simulation) -> QVector3D;
 
@@ -124,6 +145,11 @@ pub struct SimulationRust {
     pull_force: f32,
     pull_extension: f32,
     anchored_index: i32,
+    pull_coordinate: f32,
+    trace_length: i32,
+    trace_min_coordinate: f32,
+    trace_max_coordinate: f32,
+    trace_max_force: f32,
 
     sys: Option<System>,
     ff: Option<ForceField>,
@@ -133,6 +159,8 @@ pub struct SimulationRust {
     centre: [Real; 3],
     anchor_local: [f32; 3],
     hold_local: [f32; 3],
+    grab_origin: [f32; 3],
+    trace: Vec<[f32; 4]>,
 }
 
 impl Default for SimulationRust {
@@ -154,6 +182,11 @@ impl Default for SimulationRust {
             pull_force: 0.0,
             pull_extension: 0.0,
             anchored_index: -1,
+            pull_coordinate: 0.0,
+            trace_length: 0,
+            trace_min_coordinate: 0.0,
+            trace_max_coordinate: 0.0,
+            trace_max_force: 0.0,
             sys: None,
             ff: None,
             bath: None,
@@ -162,6 +195,8 @@ impl Default for SimulationRust {
             centre: [0.0; 3],
             anchor_local: [0.0; 3],
             hold_local: [0.0; 3],
+            grab_origin: [0.0; 3],
+            trace: Vec::new(),
         }
     }
 }
@@ -346,6 +381,7 @@ impl qobject::Simulation {
         let observables = self.as_mut().rust_mut().get_mut().refresh();
         self.as_mut().publish(observables);
         self.as_mut().publish_pull();
+        self.as_mut().record_trace();
 
         let frame = *self.as_ref().frame() + 1;
         self.as_mut().set_frame(frame);
@@ -463,6 +499,7 @@ impl qobject::Simulation {
         {
             let rust = self.as_mut().rust_mut().get_mut();
             rust.anchor_local = position;
+            rust.grab_origin = position;
             let centre = rust.centre;
             if let Some(ff) = rust.ff.as_mut() {
                 ff.pull.index = Some(index as u32);
@@ -500,6 +537,69 @@ impl qobject::Simulation {
             }
         }
         self.publish_pull();
+    }
+
+    // 신장 좌표. 고정점이 있으면 끝-끝 거리(AFM 이 재는 것), 없으면 잡은 자리에서의 변위.
+    fn coordinate(&self) -> f32 {
+        let Some(grabbed) = self.grabbed_position() else {
+            return 0.0;
+        };
+        let other = usize::try_from(self.anchored_index)
+            .ok()
+            .and_then(|i| self.positions.get(i).copied())
+            .unwrap_or(self.grab_origin);
+        let d = [
+            grabbed[0] - other[0],
+            grabbed[1] - other[1],
+            grabbed[2] - other[2],
+        ];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    pub fn trace_coordinate_at(&self, index: i32) -> f32 {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.trace.get(i))
+            .map(|s| s[0])
+            .unwrap_or(0.0)
+    }
+
+    pub fn trace_force_at(&self, index: i32) -> f32 {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.trace.get(i))
+            .map(|s| s[1])
+            .unwrap_or(0.0)
+    }
+
+    pub fn clear_trace(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().trace.clear();
+        self.as_mut().set_trace_length(0);
+        self.as_mut().set_trace_min_coordinate(0.0);
+        self.as_mut().set_trace_max_coordinate(0.0);
+        self.as_mut().set_trace_max_force(0.0);
+    }
+
+    pub fn save_trace(mut self: Pin<&mut Self>, path: &QString) -> bool {
+        use std::fmt::Write as _;
+        let path = path.to_string();
+        let mut out = String::from("coordinate,force,q,q_tertiary\n");
+        for s in &self.trace {
+            let _ = writeln!(out, "{:.4},{:.4},{:.4},{:.4}", s[0], s[1], s[2], s[3]);
+        }
+        match std::fs::write(&path, out) {
+            Ok(()) => {
+                let n = self.trace.len();
+                self.as_mut()
+                    .set_status(QString::from(&format!("{n} samples -> {path}")));
+                true
+            }
+            Err(error) => {
+                self.as_mut()
+                    .set_status(QString::from(&format!("cannot write {path}: {error}")));
+                false
+            }
+        }
     }
 
     pub fn toggle_anchor(mut self: Pin<&mut Self>, index: i32) -> bool {
@@ -560,6 +660,39 @@ impl qobject::Simulation {
         };
         self.as_mut().set_pull_force(force);
         self.as_mut().set_pull_extension(extension);
+        let coordinate = self.as_ref().get_ref().coordinate();
+        self.as_mut().set_pull_coordinate(coordinate);
+    }
+
+    fn record_trace(mut self: Pin<&mut Self>) {
+        const CAP: usize = 200_000;
+        if *self.as_ref().grabbed_index() < 0 {
+            return;
+        }
+        let sample = [
+            *self.as_ref().pull_coordinate(),
+            *self.as_ref().pull_force(),
+            *self.as_ref().q(),
+            *self.as_ref().q_tertiary(),
+        ];
+        let rust = self.as_mut().rust_mut().get_mut();
+        if rust.trace.len() >= CAP {
+            return;
+        }
+        rust.trace.push(sample);
+        let n = rust.trace.len() as i32;
+
+        let min_coordinate = if n == 1 {
+            sample[0]
+        } else {
+            self.as_ref().trace_min_coordinate().min(sample[0])
+        };
+        let max_coordinate = self.as_ref().trace_max_coordinate().max(sample[0]);
+        let max_force = self.as_ref().trace_max_force().max(sample[1]);
+        self.as_mut().set_trace_length(n);
+        self.as_mut().set_trace_min_coordinate(min_coordinate);
+        self.as_mut().set_trace_max_coordinate(max_coordinate);
+        self.as_mut().set_trace_max_force(max_force);
     }
 
     pub fn hue_at(&self, index: i32) -> f32 {

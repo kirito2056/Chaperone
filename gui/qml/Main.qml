@@ -257,7 +257,91 @@ Window {
             Value { text: sim.grabbedIndex < 0 ? "-" : sim.pullExtension.toFixed(2) + " A" }
             Key { text: "anchored" }
             Value { text: sim.anchoredIndex < 0 ? "-" : String(sim.anchoredIndex) }
+            Key { text: "extent" }
+            Value { text: sim.grabbedIndex < 0 ? "-" : sim.pullCoordinate.toFixed(2) + " A" }
         }
+    }
+
+    Rectangle {
+        id: plotPanel
+        visible: sim.traceLength > 1
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 100
+        anchors.rightMargin: 14
+        width: 320
+        height: 200
+        radius: 6
+        color: "#d0181c22"
+
+        Text {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.margins: 8
+            color: "#78828f"
+            font.pixelSize: 11
+            text: "force vs extension  ·  " + sim.traceLength + " samples"
+        }
+
+        Canvas {
+            id: plot
+            anchors.fill: parent
+            anchors.topMargin: 26
+            anchors.margins: 10
+
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+
+                var n = sim.traceLength
+                if (n < 2)
+                    return
+
+                var x0 = sim.traceMinCoordinate
+                var span = Math.max(sim.traceMaxCoordinate - x0, 1e-3)
+                var ymax = Math.max(sim.traceMaxForce, 1e-3)
+
+                ctx.strokeStyle = "#39424f"
+                ctx.lineWidth = 1
+                ctx.beginPath()
+                ctx.moveTo(0, height)
+                ctx.lineTo(width, height)
+                ctx.moveTo(0, 0)
+                ctx.lineTo(0, height)
+                ctx.stroke()
+
+                ctx.strokeStyle = "#ffd479"
+                ctx.lineWidth = 1.4
+                ctx.beginPath()
+                var stride = Math.max(1, Math.floor(n / 900))
+                for (var i = 0; i < n; i += stride) {
+                    var px = (sim.traceCoordinateAt(i) - x0) / span * width
+                    var py = height - sim.traceForceAt(i) / ymax * height
+                    if (i === 0)
+                        ctx.moveTo(px, py)
+                    else
+                        ctx.lineTo(px, py)
+                }
+                ctx.stroke()
+            }
+        }
+
+        Text {
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 8
+            color: "#5c6672"
+            font.pixelSize: 10
+            text: sim.traceMinCoordinate.toFixed(0) + "-" + sim.traceMaxCoordinate.toFixed(0)
+                  + " A  /  0-" + sim.traceMaxForce.toFixed(0)
+        }
+    }
+
+    Timer {
+        interval: 200
+        repeat: true
+        running: plotPanel.visible
+        onTriggered: plot.requestPaint()
     }
 
     Rectangle {
@@ -286,7 +370,15 @@ Window {
                 onClicked: {
                     sim.running = false
                     sim.reset()
+                    sim.clearTrace()
                 }
+            }
+
+            Button {
+                width: 78
+                enabled: sim.traceLength > 1
+                text: "save"
+                onClicked: sim.saveTrace(runsDir + "/pull.csv")
             }
 
             Column {

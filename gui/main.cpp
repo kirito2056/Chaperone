@@ -10,6 +10,8 @@ int main(int argc, char *argv[])
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(
         QStringLiteral("defaultPdbPath"), QStringLiteral(CHAPERONE_PDB_PATH));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("runsDir"), QStringLiteral(CHAPERONE_RUNS_DIR));
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
