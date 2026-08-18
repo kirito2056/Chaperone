@@ -38,16 +38,17 @@ Window {
 
         Node {
             id: pivot
-        }
 
-        PerspectiveCamera {
-            id: camera
-            position: Qt.vector3d(0, 0, root.cameraDistance)
-            clipNear: 0.5
-            clipFar: 10000
+            PerspectiveCamera {
+                id: camera
+                z: root.cameraDistance
+                clipNear: 0.5
+                clipFar: 10000
+            }
         }
 
         OrbitCameraController {
+            anchors.fill: parent
             origin: pivot
             camera: camera
             panEnabled: true
