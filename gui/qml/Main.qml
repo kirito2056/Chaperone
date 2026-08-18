@@ -14,7 +14,9 @@ Window {
 
     readonly property real beadRadius: root.showSticks ? 1.25 : 1.6
     readonly property real bondRadius: 0.55
+    readonly property real tubeRadius: 0.95
     property bool showSticks: true
+    property bool showTube: false
     property int stepsPerFrame: 120
     property real nativeRadius: 1.0
 
@@ -84,7 +86,7 @@ Window {
             scale: Qt.vector3d(fit, fit, fit)
 
             Repeater3D {
-                model: sim.atomCount
+                model: root.showTube ? 0 : sim.atomCount
 
                 Model {
                     required property int index
@@ -112,7 +114,7 @@ Window {
             }
 
             Repeater3D {
-                model: root.showSticks ? sim.bondCount : 0
+                model: (root.showSticks && !root.showTube) ? sim.bondCount : 0
 
                 Model {
                     required property int index
@@ -130,6 +132,26 @@ Window {
                     }
                 }
             }
+            Repeater3D {
+                model: root.showTube ? sim.splineCount : 0
+
+                Model {
+                    required property int index
+
+                    source: "#Cylinder"
+                    position: (sim.frame, sim.splineMidpoint(index))
+                    rotation: (sim.frame, sim.splineRotation(index))
+                    scale: (sim.frame, Qt.vector3d(root.tubeRadius / 50,
+                                                   sim.splineLength(index) / 100 * 1.6,
+                                                   root.tubeRadius / 50))
+
+                    materials: PrincipledMaterial {
+                        baseColor: Qt.hsva(sim.splineHue(index), 0.62, 0.95, 1.0)
+                        roughness: 0.35
+                    }
+                }
+            }
+
             Model {
                 visible: sim.grabbedIndex >= 0
                 source: "#Cylinder"
@@ -398,7 +420,24 @@ Window {
             }
 
             CheckBox {
+                id: tubeBox
+                anchors.verticalCenter: parent.verticalCenter
+                text: "tube"
+                checked: root.showTube
+                onToggled: root.showTube = checked
+
+                contentItem: Text {
+                    text: tubeBox.text
+                    color: "#a8b2bf"
+                    font.pixelSize: 12
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: tubeBox.indicator.width + tubeBox.spacing
+                }
+            }
+
+            CheckBox {
                 id: sticksBox
+                enabled: !root.showTube
                 anchors.verticalCenter: parent.verticalCenter
                 text: "sticks"
                 checked: root.showSticks

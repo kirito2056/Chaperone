@@ -16,6 +16,7 @@ const DT: Real = 0.005;
 const GAMMA: Real = 0.2;
 const SEED: u64 = 20260818;
 const DEFAULT_TEMPERATURE: f32 = 0.5;
+const SPLINE_SUBDIVISIONS: usize = 3;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -33,6 +34,7 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(i32, atom_count, cxx_name = "atomCount")]
         #[qproperty(i32, bond_count, cxx_name = "bondCount")]
+        #[qproperty(i32, spline_count, cxx_name = "splineCount")]
         #[qproperty(f32, bounding_radius, cxx_name = "boundingRadius")]
         #[qproperty(f32, view_radius, cxx_name = "viewRadius")]
         #[qproperty(QString, status)]
@@ -103,6 +105,26 @@ pub mod qobject {
         fn toggle_anchor(self: Pin<&mut Simulation>, index: i32) -> bool;
 
         #[qinvokable]
+        #[cxx_name = "splineMidpoint"]
+        fn spline_midpoint(self: &Simulation, index: i32) -> QVector3D;
+
+        #[qinvokable]
+        #[cxx_name = "splineRotation"]
+        fn spline_rotation(self: &Simulation, index: i32) -> QQuaternion;
+
+        #[qinvokable]
+        #[cxx_name = "splineLength"]
+        fn spline_length(self: &Simulation, index: i32) -> f32;
+
+        #[qinvokable]
+        #[cxx_name = "splinePointAt"]
+        fn spline_point_at(self: &Simulation, index: i32) -> QVector3D;
+
+        #[qinvokable]
+        #[cxx_name = "splineHue"]
+        fn spline_hue(self: &Simulation, index: i32) -> f32;
+
+        #[qinvokable]
         #[cxx_name = "traceCoordinateAt"]
         fn trace_coordinate_at(self: &Simulation, index: i32) -> f32;
 
@@ -131,6 +153,7 @@ pub mod qobject {
 pub struct SimulationRust {
     atom_count: i32,
     bond_count: i32,
+    spline_count: i32,
     bounding_radius: f32,
     view_radius: f32,
     status: QString,
@@ -161,6 +184,7 @@ pub struct SimulationRust {
     hold_local: [f32; 3],
     grab_origin: [f32; 3],
     trace: Vec<[f32; 4]>,
+    spline: Vec<[f32; 3]>,
 }
 
 impl Default for SimulationRust {
@@ -168,6 +192,7 @@ impl Default for SimulationRust {
         SimulationRust {
             atom_count: 0,
             bond_count: 0,
+            spline_count: 0,
             bounding_radius: 1.0,
             view_radius: 1.0,
             status: QString::default(),
@@ -197,6 +222,7 @@ impl Default for SimulationRust {
             hold_local: [0.0; 3],
             grab_origin: [0.0; 3],
             trace: Vec::new(),
+            spline: Vec::new(),
         }
     }
 }
@@ -210,6 +236,43 @@ struct Observables {
 }
 
 impl SimulationRust {
+    // 균일 Catmull-Rom. 끝점은 자기 자신을 복제해 접선을 만든다.
+    fn rebuild_spline(&mut self) {
+        self.spline.clear();
+        let n = self.positions.len();
+        if n < 2 {
+            return;
+        }
+
+        let at = |i: isize| -> [f32; 3] {
+            let i = i.clamp(0, n as isize - 1) as usize;
+            self.positions[i]
+        };
+
+        for i in 0..n - 1 {
+            let p0 = at(i as isize - 1);
+            let p1 = at(i as isize);
+            let p2 = at(i as isize + 1);
+            let p3 = at(i as isize + 2);
+
+            for step in 0..SPLINE_SUBDIVISIONS {
+                let t = step as f32 / SPLINE_SUBDIVISIONS as f32;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                let mut point = [0.0f32; 3];
+                for d in 0..3 {
+                    point[d] = 0.5
+                        * (2.0 * p1[d]
+                            + (-p0[d] + p2[d]) * t
+                            + (2.0 * p0[d] - 5.0 * p1[d] + 4.0 * p2[d] - p3[d]) * t2
+                            + (-p0[d] + 3.0 * p1[d] - 3.0 * p2[d] + p3[d]) * t3);
+                }
+                self.spline.push(point);
+            }
+        }
+        self.spline.push(self.positions[n - 1]);
+    }
+
     fn refresh(&mut self) -> Observables {
         if self.sys.is_none() || self.ff.is_none() {
             return Observables {
@@ -249,6 +312,7 @@ impl SimulationRust {
             (centre, radius)
         };
         self.centre = centre;
+        self.rebuild_spline();
 
         // 2단계: 앵커는 표시 좌표에 산다. 이 프레임의 무게중심으로 시뮬 좌표를 다시 만든다.
         let anchor = self.anchor_local;
@@ -352,6 +416,8 @@ impl qobject::Simulation {
         self.as_mut().set_pull_extension(0.0);
         self.as_mut().set_atom_count(count);
         self.as_mut().set_bond_count((count - 1).max(0));
+        let segments = self.as_ref().get_ref().spline.len() as i32 - 1;
+        self.as_mut().set_spline_count(segments.max(0));
         self.as_mut().set_frame(0);
         self.as_mut().set_status(QString::from(&format!(
             "{count} residues, chain {chain}, {contacts} native contacts"
@@ -693,6 +759,51 @@ impl qobject::Simulation {
         self.as_mut().set_trace_min_coordinate(min_coordinate);
         self.as_mut().set_trace_max_coordinate(max_coordinate);
         self.as_mut().set_trace_max_force(max_force);
+    }
+
+    fn spline_ends(&self, index: i32) -> Option<([f32; 3], [f32; 3])> {
+        let i = usize::try_from(index).ok()?;
+        Some((*self.spline.get(i)?, *self.spline.get(i + 1)?))
+    }
+
+    pub fn spline_midpoint(&self, index: i32) -> QVector3D {
+        match self.spline_ends(index) {
+            Some((a, b)) => QVector3D::new(
+                0.5 * (a[0] + b[0]),
+                0.5 * (a[1] + b[1]),
+                0.5 * (a[2] + b[2]),
+            ),
+            None => QVector3D::new(0.0, 0.0, 0.0),
+        }
+    }
+
+    pub fn spline_rotation(&self, index: i32) -> QQuaternion {
+        match self.spline_ends(index) {
+            Some((a, b)) => arc_rotation(a, b),
+            None => QQuaternion::new(1.0, &QVector3D::new(0.0, 0.0, 0.0)),
+        }
+    }
+
+    pub fn spline_length(&self, index: i32) -> f32 {
+        match self.spline_ends(index) {
+            Some((a, b)) => {
+                let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+            }
+            None => 0.0,
+        }
+    }
+
+    pub fn spline_point_at(&self, index: i32) -> QVector3D {
+        match usize::try_from(index).ok().and_then(|i| self.spline.get(i)) {
+            Some(p) => QVector3D::new(p[0], p[1], p[2]),
+            None => QVector3D::new(0.0, 0.0, 0.0),
+        }
+    }
+
+    pub fn spline_hue(&self, index: i32) -> f32 {
+        let n = self.spline.len().max(2) as f32 - 1.0;
+        (index.max(0) as f32 / n) * 0.75
     }
 
     pub fn hue_at(&self, index: i32) -> f32 {
