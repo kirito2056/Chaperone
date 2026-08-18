@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+default-members = [
+    "crates/chaperone-pdb",
+    "crates/chaperone-sim",
+    "crates/chaperone-cli",
+]
 
 [workspace.package]
 version = "0.1.0"
