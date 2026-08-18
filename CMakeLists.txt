@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 project(chaperone LANGUAGES CXX)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
