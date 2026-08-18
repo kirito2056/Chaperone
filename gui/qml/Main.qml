@@ -12,7 +12,9 @@ Window {
     title: "Chaperone"
     color: "#0e1013"
 
-    readonly property real beadRadius: 1.6
+    readonly property real beadRadius: root.showSticks ? 1.25 : 1.6
+    readonly property real bondRadius: 0.55
+    property bool showSticks: true
     property int stepsPerFrame: 120
     property real nativeRadius: 1.0
 
@@ -83,16 +85,38 @@ Window {
             Repeater3D {
                 model: sim.atomCount
 
-                    Model {
+                Model {
                     required property int index
 
                     source: "#Sphere"
                     position: (sim.frame, sim.positionAt(index))
-                    scale: Qt.vector3d(root.beadRadius / 50, root.beadRadius / 50, root.beadRadius / 50)
+                    scale: Qt.vector3d(root.beadRadius / 50,
+                                       root.beadRadius / 50,
+                                       root.beadRadius / 50)
 
                     materials: PrincipledMaterial {
-                        baseColor: Qt.hsva(sim.hueAt(index), 0.65, 0.95, 1.0)
+                        baseColor: Qt.hsva(sim.hueAt(index), 0.62, 0.95, 1.0)
                         roughness: 0.35
+                    }
+                }
+            }
+
+            Repeater3D {
+                model: root.showSticks ? sim.bondCount : 0
+
+                Model {
+                    required property int index
+
+                    source: "#Cylinder"
+                    position: (sim.frame, sim.bondMidpoint(index))
+                    rotation: (sim.frame, sim.bondRotation(index))
+                    scale: (sim.frame, Qt.vector3d(root.bondRadius / 50,
+                                                   sim.bondLength(index) / 100,
+                                                   root.bondRadius / 50))
+
+                    materials: PrincipledMaterial {
+                        baseColor: Qt.hsva(sim.hueAt(index), 0.45, 0.70, 1.0)
+                        roughness: 0.5
                     }
                 }
             }
@@ -200,6 +224,22 @@ Window {
                     to: 2.0
                     value: sim.temperature
                     onMoved: sim.setBathTemperature(value)
+                }
+            }
+
+            CheckBox {
+                id: sticksBox
+                anchors.verticalCenter: parent.verticalCenter
+                text: "sticks"
+                checked: root.showSticks
+                onToggled: root.showSticks = checked
+
+                contentItem: Text {
+                    text: sticksBox.text
+                    color: "#a8b2bf"
+                    font.pixelSize: 12
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: sticksBox.indicator.width + sticksBox.spacing
                 }
             }
 

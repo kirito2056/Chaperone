@@ -1,6 +1,6 @@
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QString, QVector3D};
+use cxx_qt_lib::{QQuaternion, QString, QVector3D};
 
 use chaperone_sim::analysis::{
     fraction_of_native_contacts, fraction_of_tertiary_contacts, CONTACT_TOLERANCE,
@@ -23,12 +23,15 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qvector3d.h");
         type QVector3D = cxx_qt_lib::QVector3D;
+        include!("cxx-qt-lib/qquaternion.h");
+        type QQuaternion = cxx_qt_lib::QQuaternion;
     }
 
     extern "RustQt" {
         #[qobject]
         #[qml_element]
         #[qproperty(i32, atom_count, cxx_name = "atomCount")]
+        #[qproperty(i32, bond_count, cxx_name = "bondCount")]
         #[qproperty(f32, bounding_radius, cxx_name = "boundingRadius")]
         #[qproperty(f32, view_radius, cxx_name = "viewRadius")]
         #[qproperty(QString, status)]
@@ -62,11 +65,24 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "hueAt"]
         fn hue_at(self: &Simulation, index: i32) -> f32;
+
+        #[qinvokable]
+        #[cxx_name = "bondMidpoint"]
+        fn bond_midpoint(self: &Simulation, index: i32) -> QVector3D;
+
+        #[qinvokable]
+        #[cxx_name = "bondRotation"]
+        fn bond_rotation(self: &Simulation, index: i32) -> QQuaternion;
+
+        #[qinvokable]
+        #[cxx_name = "bondLength"]
+        fn bond_length(self: &Simulation, index: i32) -> f32;
     }
 }
 
 pub struct SimulationRust {
     atom_count: i32,
+    bond_count: i32,
     bounding_radius: f32,
     view_radius: f32,
     status: QString,
@@ -89,6 +105,7 @@ impl Default for SimulationRust {
     fn default() -> Self {
         SimulationRust {
             atom_count: 0,
+            bond_count: 0,
             bounding_radius: 1.0,
             view_radius: 1.0,
             status: QString::default(),
@@ -225,6 +242,7 @@ impl qobject::Simulation {
         let observables = self.as_mut().rust_mut().get_mut().refresh();
         self.as_mut().publish(observables);
         self.as_mut().set_atom_count(count);
+        self.as_mut().set_bond_count((count - 1).max(0));
         self.as_mut().set_frame(0);
         self.as_mut().set_status(QString::from(&format!(
             "{count} residues, chain {chain}, {contacts} native contacts"
@@ -301,6 +319,60 @@ impl qobject::Simulation {
             Some(p) => QVector3D::new(p[0], p[1], p[2]),
             None => QVector3D::new(0.0, 0.0, 0.0),
         }
+    }
+
+    fn bond_ends(&self, index: i32) -> Option<([f32; 3], [f32; 3])> {
+        let i = usize::try_from(index).ok()?;
+        Some((*self.positions.get(i)?, *self.positions.get(i + 1)?))
+    }
+
+    pub fn bond_midpoint(&self, index: i32) -> QVector3D {
+        match self.bond_ends(index) {
+            Some((a, b)) => QVector3D::new(
+                0.5 * (a[0] + b[0]),
+                0.5 * (a[1] + b[1]),
+                0.5 * (a[2] + b[2]),
+            ),
+            None => QVector3D::new(0.0, 0.0, 0.0),
+        }
+    }
+
+    pub fn bond_length(&self, index: i32) -> f32 {
+        match self.bond_ends(index) {
+            Some((a, b)) => {
+                let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+            }
+            None => 0.0,
+        }
+    }
+
+    // #Cylinder 는 +Y 를 따라 서 있다. +Y 에서 결합 방향으로 가는 최단호 회전을 준다.
+    pub fn bond_rotation(&self, index: i32) -> QQuaternion {
+        let identity = QQuaternion::new(1.0, &QVector3D::new(0.0, 0.0, 0.0));
+        let Some((a, b)) = self.bond_ends(index) else {
+            return identity;
+        };
+
+        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-6 {
+            return identity;
+        }
+        let d = [d[0] / len, d[1] / len, d[2] / len];
+
+        // w = 1 + Y·d,  v = Y × d = (dz, 0, -dx)
+        let w = 1.0 + d[1];
+        if w < 1e-6 {
+            // 정확히 -Y 방향: 축이 사라지므로 X 축 180도로 고정한다
+            return QQuaternion::new(0.0, &QVector3D::new(1.0, 0.0, 0.0));
+        }
+        let v = [d[2], 0.0, -d[0]];
+        let norm = (w * w + v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        QQuaternion::new(
+            w / norm,
+            &QVector3D::new(v[0] / norm, v[1] / norm, v[2] / norm),
+        )
     }
 
     pub fn hue_at(&self, index: i32) -> f32 {
