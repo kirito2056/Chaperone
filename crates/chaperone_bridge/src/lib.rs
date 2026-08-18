@@ -6,7 +6,7 @@ use chaperone_sim::analysis::{
     fraction_of_native_contacts, fraction_of_tertiary_contacts, CONTACT_TOLERANCE,
 };
 use chaperone_sim::forcefield::ForceField;
-use chaperone_sim::scenario::PULL_K;
+use chaperone_sim::scenario::{ANCHOR_K, PULL_K};
 use chaperone_sim::scenario::{ANGLE_K, BOND_K, EPS, K_PHI1, K_PHI3, SIGMA};
 use chaperone_sim::system::{Real, System};
 use chaperone_sim::thermostat::{sample_initial_velocities, Langevin};
@@ -46,6 +46,7 @@ pub mod qobject {
         #[qproperty(i32, grabbed_index, cxx_name = "grabbedIndex")]
         #[qproperty(f32, pull_force, cxx_name = "pullForce")]
         #[qproperty(f32, pull_extension, cxx_name = "pullExtension")]
+        #[qproperty(i32, anchored_index, cxx_name = "anchoredIndex")]
         type Simulation = super::SimulationRust;
 
         #[qinvokable]
@@ -93,6 +94,10 @@ pub mod qobject {
         fn release(self: Pin<&mut Simulation>);
 
         #[qinvokable]
+        #[cxx_name = "toggleAnchor"]
+        fn toggle_anchor(self: Pin<&mut Simulation>, index: i32) -> bool;
+
+        #[qinvokable]
         #[cxx_name = "pullMidpoint"]
         fn pull_midpoint(self: &Simulation) -> QVector3D;
 
@@ -118,6 +123,7 @@ pub struct SimulationRust {
     grabbed_index: i32,
     pull_force: f32,
     pull_extension: f32,
+    anchored_index: i32,
 
     sys: Option<System>,
     ff: Option<ForceField>,
@@ -126,6 +132,7 @@ pub struct SimulationRust {
     positions: Vec<[f32; 3]>,
     centre: [Real; 3],
     anchor_local: [f32; 3],
+    hold_local: [f32; 3],
 }
 
 impl Default for SimulationRust {
@@ -146,6 +153,7 @@ impl Default for SimulationRust {
             grabbed_index: -1,
             pull_force: 0.0,
             pull_extension: 0.0,
+            anchored_index: -1,
             sys: None,
             ff: None,
             bath: None,
@@ -153,6 +161,7 @@ impl Default for SimulationRust {
             positions: Vec::new(),
             centre: [0.0; 3],
             anchor_local: [0.0; 3],
+            hold_local: [0.0; 3],
         }
     }
 }
@@ -208,12 +217,20 @@ impl SimulationRust {
 
         // 2단계: 앵커는 표시 좌표에 산다. 이 프레임의 무게중심으로 시뮬 좌표를 다시 만든다.
         let anchor = self.anchor_local;
+        let hold = self.hold_local;
         if let Some(ff) = self.ff.as_mut() {
             if ff.pull.is_active() {
                 ff.pull.target = [
                     anchor[0] as Real + centre[0],
                     anchor[1] as Real + centre[1],
                     anchor[2] as Real + centre[2],
+                ];
+            }
+            if ff.anchor.is_active() {
+                ff.anchor.target = [
+                    hold[0] as Real + centre[0],
+                    hold[1] as Real + centre[1],
+                    hold[2] as Real + centre[2],
                 ];
             }
         }
@@ -294,6 +311,10 @@ impl qobject::Simulation {
 
         let observables = self.as_mut().rust_mut().get_mut().refresh();
         self.as_mut().publish(observables);
+        self.as_mut().set_grabbed_index(-1);
+        self.as_mut().set_anchored_index(-1);
+        self.as_mut().set_pull_force(0.0);
+        self.as_mut().set_pull_extension(0.0);
         self.as_mut().set_atom_count(count);
         self.as_mut().set_bond_count((count - 1).max(0));
         self.as_mut().set_frame(0);
@@ -479,6 +500,42 @@ impl qobject::Simulation {
             }
         }
         self.publish_pull();
+    }
+
+    pub fn toggle_anchor(mut self: Pin<&mut Self>, index: i32) -> bool {
+        if *self.as_ref().anchored_index() == index {
+            if let Some(ff) = self.as_mut().rust_mut().get_mut().ff.as_mut() {
+                ff.anchor.release();
+            }
+            self.as_mut().set_anchored_index(-1);
+            return true;
+        }
+
+        let Some(position) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.positions.get(i).copied())
+        else {
+            return false;
+        };
+
+        {
+            let rust = self.as_mut().rust_mut().get_mut();
+            rust.hold_local = position;
+            let centre = rust.centre;
+            let Some(ff) = rust.ff.as_mut() else {
+                return false;
+            };
+            ff.anchor.index = Some(index as u32);
+            ff.anchor.k = ANCHOR_K;
+            ff.anchor.target = [
+                position[0] as Real + centre[0],
+                position[1] as Real + centre[1],
+                position[2] as Real + centre[2],
+            ];
+        }
+
+        self.as_mut().set_anchored_index(index);
+        true
     }
 
     pub fn release(mut self: Pin<&mut Self>) {

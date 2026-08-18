@@ -90,19 +90,22 @@ Window {
                     required property int index
                     property int beadIndex: index
                     readonly property bool grabbed: index === sim.grabbedIndex
+                    readonly property bool anchored: index === sim.anchoredIndex
 
                     pickable: true
                     source: "#Sphere"
                     position: (sim.frame, sim.positionAt(index))
                     scale: {
-                        var r = root.beadRadius * (grabbed ? 1.7 : 1.0) / 50
+                        var r = root.beadRadius * ((grabbed || anchored) ? 1.7 : 1.0) / 50
                         return Qt.vector3d(r, r, r)
                     }
 
                     materials: PrincipledMaterial {
                         baseColor: grabbed
                             ? "#ffffff"
-                            : Qt.hsva(sim.hueAt(index), 0.62, 0.95, 1.0)
+                            : anchored
+                                ? "#ff9d4d"
+                                : Qt.hsva(sim.hueAt(index), 0.62, 0.95, 1.0)
                         roughness: 0.35
                     }
                 }
@@ -145,7 +148,7 @@ Window {
     MouseArea {
         id: grabArea
         anchors.fill: parent
-        acceptedButtons: Qt.LeftButton
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
         property real depth: 0
 
         function anchorFrom(px, py) {
@@ -155,6 +158,13 @@ Window {
 
         onPressed: (mouse) => {
             var hit = view.pick(mouse.x, mouse.y)
+
+            if (mouse.button === Qt.RightButton) {
+                if (hit.objectHit && hit.objectHit.beadIndex !== undefined)
+                    sim.toggleAnchor(hit.objectHit.beadIndex)
+                return
+            }
+
             if (hit.objectHit && hit.objectHit.beadIndex !== undefined) {
                 // 깊이는 반드시 mapFrom3DScene 의 z 로. pickResult.distance 는
                 // 광선 길이라 mapTo3DScene 의 규약(근평면 거리)과 다르다.
@@ -245,6 +255,8 @@ Window {
             Value { text: sim.grabbedIndex < 0 ? "-" : sim.pullForce.toFixed(1) }
             Key { text: "extension" }
             Value { text: sim.grabbedIndex < 0 ? "-" : sim.pullExtension.toFixed(2) + " A" }
+            Key { text: "anchored" }
+            Value { text: sim.anchoredIndex < 0 ? "-" : String(sim.anchoredIndex) }
         }
     }
 
@@ -334,6 +346,6 @@ Window {
         anchors.margins: 14
         color: "#4c5663"
         font.pixelSize: 11
-        text: "drag a bead to pull  ·  space to play/pause  ·  drag empty space to orbit"
+        text: "drag a bead to pull  ·  right-click a bead to anchor  ·  space to play/pause"
     }
 }

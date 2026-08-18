@@ -22,12 +22,19 @@ pub struct Energies {
     pub native: Real,
     pub repulsion: Real,
     pub pull: Real,
+    pub anchor: Real,
     pub kinetic: Real,
 }
 
 impl Energies {
     pub fn potential(&self) -> Real {
-        self.bond + self.angle + self.dihedral + self.native + self.repulsion + self.pull
+        self.bond
+            + self.angle
+            + self.dihedral
+            + self.native
+            + self.repulsion
+            + self.pull
+            + self.anchor
     }
 
     pub fn total(&self) -> Real {
@@ -48,6 +55,7 @@ pub struct ForceField {
     pub eps: Real,
     pub sigma: Real,
     pub pull: Pull,
+    pub anchor: Pull,
 }
 
 impl ForceField {
@@ -72,6 +80,7 @@ impl ForceField {
             eps,
             sigma,
             pull: Pull::new(crate::scenario::PULL_K),
+            anchor: Pull::new(crate::scenario::ANCHOR_K),
         }
     }
 
@@ -82,6 +91,7 @@ impl ForceField {
         self.native.validate(n);
         self.repulsion_pairs.validate(n);
         self.pull.validate(n);
+        self.anchor.validate(n);
         assert!(
             self.sigma > 0.0,
             "sigma must be positive, got {}",
@@ -97,6 +107,7 @@ impl ForceField {
             native: native::accumulate(sys, &self.native, self.eps),
             repulsion: repulsion::accumulate(sys, &self.repulsion_pairs, self.eps, self.sigma),
             pull: pull::accumulate(sys, &self.pull),
+            anchor: pull::accumulate(sys, &self.anchor),
             kinetic: 0.0,
         }
     }
@@ -108,5 +119,6 @@ impl ForceField {
             + native::energy(sys, &self.native, self.eps)
             + repulsion::energy(sys, &self.repulsion_pairs, self.eps, self.sigma)
             + pull::energy(sys, &self.pull)
+            + pull::energy(sys, &self.anchor)
     }
 }

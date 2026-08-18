@@ -13,7 +13,8 @@ use chaperone_sim::forcefield::repulsion;
 use chaperone_sim::forcefield::ForceField;
 use chaperone_sim::integrator;
 use chaperone_sim::scenario::{
-    self, ANGLE_K, BOND_K, EPS, K_PHI1, K_PHI3, MIN_SEQUENCE_SEPARATION, PULL_K, R0, SIGMA,
+    self, ANCHOR_K, ANGLE_K, BOND_K, EPS, K_PHI1, K_PHI3, MIN_SEQUENCE_SEPARATION, PULL_K, R0,
+    SIGMA,
 };
 use chaperone_sim::system::{Real, System, PI};
 
@@ -1537,4 +1538,79 @@ fn an_empty_pull_matches_the_golden_trajectory() {
             "bead {i} drifted from the trajectory recorded before the pull term existed"
         );
     }
+}
+
+#[test]
+fn an_anchor_and_a_pull_sum_in_the_net_force() {
+    let (mut sys, mut ff) = scenario::chain5();
+
+    let pull_target = [sys.pos_x[4] + 1.8, sys.pos_y[4] - 1.1, sys.pos_z[4] + 0.6];
+    let anchor_target = [sys.pos_x[0] - 0.4, sys.pos_y[0] + 0.9, sys.pos_z[0] - 0.3];
+    ff.pull = Pull {
+        index: Some(4),
+        target: pull_target,
+        k: PULL_K,
+    };
+    ff.anchor = Pull {
+        index: Some(0),
+        target: anchor_target,
+        k: ANCHOR_K,
+    };
+
+    sys.clear_forces();
+    ff.accumulate(&mut sys);
+
+    let (fx, fy, fz) = sys.total_force();
+    let expected = [
+        PULL_K * (pull_target[0] - sys.pos_x[4]) + ANCHOR_K * (anchor_target[0] - sys.pos_x[0]),
+        PULL_K * (pull_target[1] - sys.pos_y[4]) + ANCHOR_K * (anchor_target[1] - sys.pos_y[0]),
+        PULL_K * (pull_target[2] - sys.pos_z[4]) + ANCHOR_K * (anchor_target[2] - sys.pos_z[0]),
+    ];
+    for (got, want) in [(fx, expected[0]), (fy, expected[1]), (fz, expected[2])] {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "net force {got:.9} vs pull plus anchor {want:.9}; the two restraints are the \
+             only external forces and every internal term must still cancel"
+        );
+    }
+}
+
+#[test]
+fn an_anchor_holds_its_bead_against_a_pull() {
+    const STEPS: usize = 40_000;
+    let (mut sys, mut ff) = scenario::chain5();
+
+    let held = [sys.pos_x[0], sys.pos_y[0], sys.pos_z[0]];
+    ff.anchor = Pull {
+        index: Some(0),
+        target: held,
+        k: ANCHOR_K,
+    };
+    ff.pull = Pull {
+        index: Some(4),
+        target: [sys.pos_x[4] + 30.0, sys.pos_y[4], sys.pos_z[4]],
+        k: PULL_K,
+    };
+
+    integrator::initialize(&mut sys, &ff);
+    let mut bath = chaperone_sim::thermostat::Langevin::new(0.2, 0.3, 1e-3, 4242);
+    for _ in 0..STEPS {
+        bath.step(&mut sys, &ff);
+    }
+
+    let held_drift = ((sys.pos_x[0] - held[0]).powi(2)
+        + (sys.pos_y[0] - held[1]).powi(2)
+        + (sys.pos_z[0] - held[2]).powi(2))
+    .sqrt();
+
+    assert!(
+        held_drift < 5.0,
+        "the anchored bead wandered {held_drift:.3} A; the clamp caps the restoring force \
+         at k * 5 A, so it must not exceed that reach"
+    );
+    assert!(
+        sys.distance(0, 4) > 6.0,
+        "d(0,4) = {:.3}; the pull should stretch the chain against the anchor",
+        sys.distance(0, 4)
+    );
 }
