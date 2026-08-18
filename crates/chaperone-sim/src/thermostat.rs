@@ -31,6 +31,11 @@ impl Langevin {
         }
     }
 
+    pub fn set_temperature(&mut self, temperature: Real) {
+        assert!(temperature > 0.0, "temperature must be positive");
+        self.temperature = temperature;
+    }
+
     pub fn steps_taken(&self) -> u64 {
         self.step_count
     }

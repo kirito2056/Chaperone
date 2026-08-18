@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick Quick3D QmlImportScanner)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick Quick3D QuickControls2 QmlImportScanner)
 
 find_package(CxxQt QUIET)
 if(NOT CxxQt_FOUND)

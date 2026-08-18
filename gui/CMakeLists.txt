@@ -8,6 +8,7 @@ target_compile_definitions(chaperone-gui PRIVATE
 target_link_libraries(chaperone-gui PRIVATE
     Qt6::Quick
     Qt6::Quick3D
+    Qt6::QuickControls2
     chaperone_qml_module
 )
 

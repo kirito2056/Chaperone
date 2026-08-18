@@ -505,3 +505,36 @@ fn noise_is_independent_across_particles() {
         T_TEST / M_TEST
     );
 }
+
+#[test]
+fn the_bath_temperature_can_change_mid_run() {
+    const N: usize = 4000;
+    const STEPS: usize = 2000;
+    const COLD: Real = 0.4;
+    const HOT: Real = 1.2;
+
+    let mut sys = System::new(N);
+    let ff = ForceField::new(1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    let mut bath = Langevin::new(1.0, COLD, 0.01, 4242);
+
+    for _ in 0..STEPS {
+        bath.step(&mut sys, &ff);
+    }
+    let cold = instantaneous_temperature(&sys);
+
+    bath.set_temperature(HOT);
+    for _ in 0..STEPS {
+        bath.step(&mut sys, &ff);
+    }
+    let hot = instantaneous_temperature(&sys);
+
+    assert!(
+        (cold / COLD - 1.0).abs() < 0.05,
+        "measured {cold:.4} against the {COLD} set point"
+    );
+    assert!(
+        (hot / HOT - 1.0).abs() < 0.05,
+        "measured {hot:.4} after switching to {HOT}; c1 and c2 depend only on gamma*dt, \
+         so changing the temperature must not disturb the noise stream"
+    );
+}
