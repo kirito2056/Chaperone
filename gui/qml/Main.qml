@@ -28,7 +28,7 @@ Window {
         sim.loadPdb(defaultPdbPath)
         console.warn("chaperone:", sim.status)
         root.nativeRadius = Math.max(sim.boundingRadius, 1.0)
-        camera.z = root.nativeRadius * 2.8
+        sceneCamera.z = root.nativeRadius * 2.8
     }
 
     FrameAnimation {
@@ -44,6 +44,7 @@ Window {
     View3D {
         id: view
         anchors.fill: parent
+        camera: sceneCamera
 
         environment: SceneEnvironment {
             clearColor: root.color
@@ -56,7 +57,7 @@ Window {
             id: pivot
 
             PerspectiveCamera {
-                id: camera
+                id: sceneCamera
                 clipNear: 0.5
                 clipFar: 20000
             }
@@ -66,7 +67,7 @@ Window {
             id: orbit
             anchors.fill: parent
             origin: pivot
-            camera: camera
+            camera: sceneCamera
             panEnabled: true
         }
 
