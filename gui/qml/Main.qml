@@ -61,6 +61,7 @@ Window {
         }
 
         OrbitCameraController {
+            id: orbit
             anchors.fill: parent
             origin: pivot
             camera: camera
@@ -87,15 +88,21 @@ Window {
 
                 Model {
                     required property int index
+                    property int beadIndex: index
+                    readonly property bool grabbed: index === sim.grabbedIndex
 
+                    pickable: true
                     source: "#Sphere"
                     position: (sim.frame, sim.positionAt(index))
-                    scale: Qt.vector3d(root.beadRadius / 50,
-                                       root.beadRadius / 50,
-                                       root.beadRadius / 50)
+                    scale: {
+                        var r = root.beadRadius * (grabbed ? 1.7 : 1.0) / 50
+                        return Qt.vector3d(r, r, r)
+                    }
 
                     materials: PrincipledMaterial {
-                        baseColor: Qt.hsva(sim.hueAt(index), 0.62, 0.95, 1.0)
+                        baseColor: grabbed
+                            ? "#ffffff"
+                            : Qt.hsva(sim.hueAt(index), 0.62, 0.95, 1.0)
                         roughness: 0.35
                     }
                 }
@@ -120,6 +127,61 @@ Window {
                     }
                 }
             }
+            Model {
+                visible: sim.grabbedIndex >= 0
+                source: "#Cylinder"
+                position: (sim.frame, sim.pullExtension, sim.pullMidpoint())
+                rotation: (sim.frame, sim.pullExtension, sim.pullRotation())
+                scale: (sim.frame, Qt.vector3d(0.007, sim.pullExtension / 100, 0.007))
+
+                materials: PrincipledMaterial {
+                    baseColor: "#ffd479"
+                    lighting: PrincipledMaterial.NoLighting
+                }
+            }
+        }
+    }
+
+    MouseArea {
+        id: grabArea
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton
+        property real depth: 0
+
+        function anchorFrom(px, py) {
+            var scene = view.mapTo3DScene(Qt.vector3d(px, py, depth))
+            return molecule.mapPositionFromScene(scene)
+        }
+
+        onPressed: (mouse) => {
+            var hit = view.pick(mouse.x, mouse.y)
+            if (hit.objectHit && hit.objectHit.beadIndex !== undefined) {
+                // 깊이는 반드시 mapFrom3DScene 의 z 로. pickResult.distance 는
+                // 광선 길이라 mapTo3DScene 의 규약(근평면 거리)과 다르다.
+                depth = view.mapFrom3DScene(hit.scenePosition).z
+                if (sim.grab(hit.objectHit.beadIndex)) {
+                    orbit.enabled = false
+                    return
+                }
+            }
+            mouse.accepted = false
+        }
+
+        onPositionChanged: (mouse) => {
+            if (sim.grabbedIndex < 0)
+                return
+            var local = anchorFrom(mouse.x, mouse.y)
+            sim.dragTo(local.x, local.y, local.z)
+        }
+
+        onReleased: {
+            sim.release()
+            orbit.enabled = true
+        }
+
+        onCanceled: {
+            sim.release()
+            orbit.enabled = true
         }
     }
 
@@ -179,6 +241,10 @@ Window {
             Value { text: sim.stepsPerSecond.toFixed(0) }
             Key { text: "frame" }
             Value { text: sim.frame }
+            Key { text: "pull |F|" }
+            Value { text: sim.grabbedIndex < 0 ? "-" : sim.pullForce.toFixed(1) }
+            Key { text: "extension" }
+            Value { text: sim.grabbedIndex < 0 ? "-" : sim.pullExtension.toFixed(2) + " A" }
         }
     }
 
@@ -268,6 +334,6 @@ Window {
         anchors.margins: 14
         color: "#4c5663"
         font.pixelSize: 11
-        text: "space to play/pause  ·  drag to orbit  ·  wheel to zoom"
+        text: "drag a bead to pull  ·  space to play/pause  ·  drag empty space to orbit"
     }
 }
