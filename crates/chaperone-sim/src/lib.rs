@@ -5,6 +5,7 @@ pub mod integrator;
 pub mod model;
 pub mod rng;
 pub mod scenario;
+pub mod secondary;
 pub mod system;
 pub mod thermostat;
 
